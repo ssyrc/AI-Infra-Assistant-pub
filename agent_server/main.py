@@ -615,6 +615,19 @@ _PATH_RE = re.compile(r"(?<![\w.])/(?:[\w.@+-]+/){1,}[\w.@+-]*")
 _GUIDE_MARKERS = ("자세한 내용은 다음 문서", "가이드 문서:", "가이드 위치:")
 
 
+# 답변에서 계정처럼 보이는 토큰(`말.말`). `pii._ACCOUNT_RE`는 점 앞에 숫자를 요구해
+# `other.user`을 놓치므로, 노출 차단용으로는 더 넓게 본다.
+_ACCOUNTISH_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_-]{1,15}\.[A-Za-z][A-Za-z0-9_-]{1,20}\b")
+# 계정이 아닌 것: 파일 확장자와 도메인 꼬리. 여기 없는 확장자가 오면 줄 하나가 빠질 뿐이고,
+# 반대 방향(남의 계정 노출)보다 훨씬 가벼운 실패다.
+_NOT_ACCOUNT_SUFFIX = {
+    "py", "sh", "md", "yml", "yaml", "json", "log", "txt", "csv", "tsv", "sql",
+    "html", "js", "css", "svg", "png", "jpg", "tar", "gz", "whl", "cfg", "conf",
+    "ini", "env", "example", "bak", "tmp", "lock", "toml", "xml", "pdf", "xlsx",
+    "com", "net", "org", "io", "kr", "local", "internal", "dev", "test",
+}
+
+
 class _AnswerGuard:
     """근거 없는 답변을 **내보내지 않는다** (#155).
 
@@ -630,11 +643,32 @@ class _AnswerGuard:
     """
 
     def __init__(self, enabled: bool, question: str, env_text: str = "",
-                 intake: str = ""):
+                 intake: str = "", user_id: str = ""):
         self.enabled = enabled
         self.intake = (intake or "").strip()
+        self.user_id = (user_id or "").strip().lower()
         self.searched_manual = False
         self.corpus = [question or "", env_text or ""]
+
+    def _foreign_accounts(self, answer: str) -> list:
+        """답변에 든 **남의 계정**을 찾는다 (#171).
+
+        VOC 검색 결과는 `pii.mask_record`가 이미 가린다. 남는 구멍은 **질문에 적힌 남의
+        계정을 답변이 그대로 되뇌는 것**이다 — 실제로 `{남의계정}으로 접속이 불가합니다`에
+        `귀하의 계정({남의계정})으로 …`라고 답했다. 근거에 있느냐로는 못 막는다.
+        질문 자체가 근거이기 때문이다. **호출자 본인 계정이 아니면 전부 막는다.**
+        """
+        # 호출자를 모르면(테스트·내부 호출) 판단할 수 없다. 그때는 막지 않는다 —
+        # 전부 막으면 본인 계정이 든 정상 답변까지 사라진다.
+        if not self.user_id:
+            return []
+        # `pii._ACCOUNT_RE`보다 **넓게** 잡는다. 그건 점 앞에 숫자가 있는 형태만 보므로
+        # `other.user` 같은 계정을 놓친다(마스킹에도 같은 구멍이 있다 — 별건으로 고친다).
+        # 여기서는 파일명·도메인을 접미사로 걸러 내고 나머지 `말.말`을 전부 계정으로 본다.
+        # **거짓 양성(줄 하나가 빠짐)보다 거짓 음성(남의 계정 노출)이 훨씬 나쁘다.**
+        return [m for m in dict.fromkeys(_ACCOUNTISH_RE.findall(answer or ""))
+                if m.strip().lower() != self.user_id
+                and m.rsplit(".", 1)[-1].lower() not in _NOT_ACCOUNT_SUFFIX]
 
     def seed_rag(self, manual_hits: list, voc_hits: list = ()):
         """선검색(`_rag_context`)으로 이미 확보한 근거를 등록한다.
@@ -712,7 +746,8 @@ class _AnswerGuard:
             return answer
         if not self.searched_manual and any(k in answer for k in _GUIDE_MARKERS):
             return self.fallback("매뉴얼을 검색하지 않고 문서를 안내함")
-        bad = self._ungrounded(answer)
+        # 남의 계정은 **근거 유무와 무관하게** 막는다(질문 자체가 근거가 되어 버린다).
+        bad = self._foreign_accounts(answer) + self._ungrounded(answer)
         if not bad:
             return answer
 
@@ -740,7 +775,7 @@ async def _make_grounding(question: str, user_id: str = ""):
         await get_config("openwebui_public_url", ""),
         intake,
     ) if x)
-    return _AnswerGuard(on, question, env, intake)
+    return _AnswerGuard(on, question, env, intake, user_id=user_id)
 
 
 class _Pace:

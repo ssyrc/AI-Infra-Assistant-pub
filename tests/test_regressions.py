@@ -3449,3 +3449,29 @@ def test_prefetch_embeds_the_query_once_not_twice():
     assert body.count("_embed_once(bare)") == 1, "질의 벡터를 한 번만 만들어야 한다"
     assert "_search_manual_for(bare, max(1, mk), vec)" in body
     assert "_search_voc_for(bare, max(1, vk), vec)" in body, "VOC가 벡터를 다시 만든다"
+
+
+# --- #171: 남의 계정은 답변에 나오면 안 된다 -------------------------------------------
+def test_answer_never_repeats_someone_elses_account():
+    """사용자: "{다른 사람 계정}으로 접속이 불가한데" → 에이전트가
+    "귀하의 계정({다른 사람 계정})으로 …"라고 답했다. **절대 안 된다** (#171).
+
+    VOC 검색 결과는 `pii.mask_record`가 이미 가린다. 남은 구멍은 **질문에 적힌 남의 계정을
+    답변이 되뇌는 것**이라, 근거 유무로는 못 막는다(질문 자체가 근거다).
+    호출자 본인 계정이 아니면 그 줄을 덜어낸다."""
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    sys.path.insert(0, os.path.join(ROOT, "shared"))
+    import json as _json
+    ns = {"re": re, "json": _json}
+    exec(src[src.index("_IP_RE = "):src.index("async def _make_grounding(")], ns)  # noqa: S102
+    g = ns["_AnswerGuard"](True, "other.user 으로 접속이 불가합니다", user_id="ops.user")
+    g.searched_manual = True
+
+    out = g.review("귀하의 계정(other.user)으로 접속이 불가한 사례가 있습니다.\n"
+                   "홈 정리를 먼저 해 보세요. 그래도 안 되면 접수해 주세요.")
+    assert "other.user" not in out, "남의 계정이 답변에 그대로 나갔다"
+    assert "홈 정리를 먼저" in out, "남의 계정이 없는 줄까지 버렸다"
+
+    # 본인 계정은 그대로 나가야 한다.
+    keep = g.review("ops.user 님의 홈은 정상입니다. 확인해 보세요.")
+    assert "ops.user" in keep
