@@ -823,6 +823,16 @@ async def _make_grounding(question: str, user_id: str = ""):
     return _AnswerGuard(on, question, env, intake, user_id=user_id)
 
 
+def _short(value, limit: int = 300) -> str:
+    """로그 한 줄에 들어갈 만큼만 줄인 표현. 실행 결과 원문이 로그를 덮지 않게 한다."""
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        text = str(value)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit] + f"…({len(text)}자)"
+
+
 class _Pace:
     """요청 하나가 어디에 시간을 썼는지 로그로 남긴다.
 
@@ -849,14 +859,22 @@ class _Pace:
             self.prep_at = time.monotonic() - self.t0
 
     def observe(self, event):
-        self.tool_calls += len(event.get_function_calls() or [])
+        # **무엇을 어떤 인자로 불렀고 무엇이 돌아왔는지 남긴다** (#180).
+        # 여태 이게 없어서, "실행이 안 된다"를 볼 때마다 도구 목록·지시문·프롬프트를 차례로
+        # 추측했다. 도구가 거부를 돌려준 것인지, 빈 결과였는지, 애초에 다른 도구를 부른
+        # 것인지는 **로그 한 줄이면 갈린다.**
+        for fc in (event.get_function_calls() or []):
+            self.tool_calls += 1
+            print(f"[agent] {self.request_id} 도구 호출: {fc.name} {_short(fc.args)}")
         for fr in (event.get_function_responses() or []):
             resp = fr.response
             if not isinstance(resp, dict):
+                print(f"[agent] {self.request_id} 도구 결과: {fr.name} → {_short(resp)}")
                 continue
             inner = resp.get("result") if isinstance(resp.get("result"), dict) else resp
             if isinstance(inner, dict) and isinstance(inner.get("duration_ms"), int):
                 self.tool_ms += inner["duration_ms"]
+            print(f"[agent] {self.request_id} 도구 결과: {fr.name} → {_short(inner)}")
 
     def mark_first_text(self):
         if self.first_text_at is None:
@@ -1314,11 +1332,11 @@ async def _embed_once(query: str):
         return None
 
 
-async def _search_manual_for(query: str, top_k: int, vec=None):
+async def _search_manual_for(query: str, top_k: int, vec=None, more=None):
     try:
         from manual_search import search_manual_chunks
         _mode, results = await search_manual_chunks(query, top_k, with_neighbors=True,
-                                                    vec=vec)
+                                                    vec=vec, more=more)
         return results
     except Exception as e:  # noqa: BLE001
         # 매뉴얼 DB나 임베딩이 죽어도 답변 자체는 계속돼야 한다(모델이 툴로 다시 시도한다).
@@ -1326,10 +1344,10 @@ async def _search_manual_for(query: str, top_k: int, vec=None):
         return []
 
 
-async def _search_voc_for(query: str, top_k: int, vec=None):
+async def _search_voc_for(query: str, top_k: int, vec=None, more=None):
     try:
         from voc_search import search_voc_records
-        return await search_voc_records(query, top_k, vec=vec)
+        return await search_voc_records(query, top_k, vec=vec, more=more)
     except Exception as e:  # noqa: BLE001
         print(f"[agent] VOC 선검색 실패(무시): {type(e).__name__}: {e}")
         return []
@@ -1434,72 +1452,112 @@ def _now_asking(question: str) -> str:
             "부르지 않고, 앞 답변의 문장을 다시 쓰지 않습니다.\n")
 
 
-_ROUTE_PROMPT = (
-    "다음 문의에 답하려면 **그 사용자의 계정으로 서버에서 커맨드를 실행해 지금의 값을 직접 "
-    "봐야만** 하는지 판단하라.\n"
-    "판단 기준: 그 답이 사용자·계정·시점에 따라 달라지는 **그 사람의 현재 값**인가"
-    "(내 경로·내 사용량·내 작업 목록처럼), 아니면 문서에 적혀 있을 수 있는 "
-    "**방법·정책·원인**인가.\n"
-    "값이면 `실행`, 그 밖이면 `검색`이다. 증상을 호소하거나(안 된다·오류가 난다) 방법·개념을 "
-    "묻는 것은 `검색`이다.\n"
-    "확실하지 않으면 `검색`이라고 답하라.\n"
-    "다른 말 없이 한 단어로만 답하라: 실행 또는 검색\n\n문의: "
-)
+_PLAN_PROMPT = """사내 인프라 문의를 받는 라우터다. 아래 문의를 보고 **JSON 하나만** 출력한다.
+
+{"mode":"execute"|"search","sources":["manual","voc"],"queries":["검색어","검색어"]}
+
+- mode — 답이 **그 사용자의 현재 값**(계정·시점에 따라 달라지는 값)이라 서버에서 커맨드를
+  실행해야만 알 수 있으면 "execute". 방법·정책·구성·증상·원인을 묻는 것은 "search".
+  판단이 서지 않으면 "search".
+- sources — "manual"은 사내 매뉴얼(사용법·절차·정책·인프라 구성과 현황),
+  "voc"는 과거 문의 이력(증상·오류·장애의 선례). **필요한 것만** 넣는다.
+  문서에 적혀 있을 성질이면 manual만, 겪은 사람이 있어야 아는 것이면 voc만, 둘 다면 둘 다.
+  mode가 execute면 [].
+- queries — 그 근거를 찾을 **검색어 2~3개**. 첫 번째는 핵심 명사만 남긴 짧은 것,
+  나머지는 **문서에 실제로 쓰였을 법한 다른 표현**(같은 뜻의 한국어·영어 용어, 표 머리글에
+  쓸 법한 낱말). 문의 문장을 그대로 베끼지 않는다. mode가 execute면 [].
+
+문의: """
 
 
-async def _route_needs_execution(question: str) -> bool:
-    """이 질문이 **실행해야만 답이 나오는 것**인가 (#177).
+async def _plan_question(question: str) -> dict:
+    """질문 하나를 **어떻게 처리할지** LLM에 한 번 물어 본다 (#180).
 
-    사용자 지시: "지금은 무조건 manual, voc mcp 둘다 실행하게끔 되어 있는데, 자유롭게 agent가
-    판단해서, command를 실행해서 확인해야 하는 경우 빼고 전부 매뉴얼이나 과거 사례 검색하게끔
-    해야 해."
+    세 가지를 한 번에 정한다. 각각 따로 물으면 왕복이 셋이 된다.
+      1. 실행해야 아는 값인가(#177) — 그러면 근거를 아예 붙이지 않는다.
+      2. 어느 근거가 필요한가 — 사용자 지적: "왜 manual_mcp, voc_mcp 는 항상 같이 실행되지?"
+      3. **무슨 말로 찾을 것인가** — 이게 이번 핵심이다.
 
-    왜 코드에서 한 번 더 묻나: `내 홈스토리지 경로 알려줘`에 선검색이 매뉴얼 3건을 물어다
-    주자, 모델이 거기 적힌 **경로 규칙**으로 답을 만들고 실행을 건너뛰었다("myquota 실행
-    결과를 종합하여" — 부르지도 않았다). 근거가 눈앞에 있으면 모델은 그것으로 답한다.
-    그러니 **그 질문에는 근거를 붙이지 않는 것**이 답이다.
+    3이 왜 중요한가: 사용자 문장을 그대로 질의로 쓰고 있었다. `서버 위치`로 찾으면 문서에
+    `서버별 Location` 표가 있어도 안 걸린다. 키워드 축은 한국어 조사·복합어에서 토큰이
+    어긋나고(`서버` ≠ `서버별`), 벡터 축 하나로는 표 형식 청크를 집어내지 못했다.
+    **질의를 여러 개로 늘려 후보를 모으고(멀티 쿼리) 리랭커가 고르게 한다** — 검색에서
+    가장 값싸고 확실한 개선이다.
 
-    **판별 기준만 주고 모델이 적용하게 한다**(질문 형태를 나열하지 않는다 - 목록에 없는
-    표현이 오면 또 뚫린다). 그리고 애매하면 `검색`으로 떨어뜨린다 — 잘못 `실행`으로 보내면
-    매뉴얼에 있는 답을 못 쓰지만, 잘못 `검색`으로 보내도 도구는 그대로 붙어 있어 모델이
-    실행할 수 있다. **틀렸을 때 더 가벼운 쪽이 기본값이다.**
+    실패하면 전부 지금까지의 동작(검색·양쪽·원문 질의)으로 떨어진다.
     """
+    fallback = {"mode": "search", "sources": ["manual", "voc"], "queries": []}
     if not _mem_on(await get_config("prefetch_route", "true")):
-        return False
+        return fallback
     base = await get_config("vllm_llm_base_url", "")
     model = await get_config("vllm_llm_model", "")
     if not base or not model:
-        return False
+        return fallback
     t0 = time.monotonic()
     try:
         client = await get_http_client()
         resp = await client.post(
             f"{base.rstrip('/')}/chat/completions",
             json={"model": model,
-                  "messages": [{"role": "user", "content": _ROUTE_PROMPT + question}],
-                  "temperature": 0, "max_tokens": 8},
-            timeout=10)
+                  "messages": [{"role": "user", "content": _PLAN_PROMPT + question}],
+                  "temperature": 0, "max_tokens": 200},
+            timeout=15)
         resp.raise_for_status()
         text = ((resp.json().get("choices") or [{}])[0]
                 .get("message", {}) or {}).get("content") or ""
     except Exception as e:  # noqa: BLE001
-        # 실패하면 **지금까지의 동작(선검색)** 으로 떨어진다. 라우팅 때문에 답변이 막히면 안 된다.
-        print(f"[agent] 질문 라우팅 실패(선검색으로 진행): {type(e).__name__}: {e}")
-        return False
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
-    hit = text.startswith("실행")
-    print(f"[agent] 질문 라우팅: {'실행' if hit else '검색'} "
-          f"({int((time.monotonic() - t0) * 1000)}ms, 응답 {text[:20]!r})")
-    return hit
+        # 라우팅 때문에 답변이 막히면 안 된다. 실패는 **지금까지의 동작**으로 떨어진다.
+        print(f"[agent] 질문 계획 실패(선검색으로 진행): {type(e).__name__}: {e}")
+        return fallback
+    plan = _parse_plan(text) or fallback
+    print(f"[agent] 질문 계획: {plan['mode']} · 근거 {','.join(plan['sources']) or '없음'} · "
+          f"질의 {plan['queries']} ({int((time.monotonic() - t0) * 1000)}ms)")
+    return plan
+
+
+def _parse_plan(text: str) -> dict | None:
+    """모델이 뱉은 것에서 JSON만 건져 낸다. 모양이 조금이라도 어긋나면 None(=기본 동작).
+
+    관대하게 해석하지 않는다 — 애매한 것을 억지로 읽어 `execute`로 보내면 매뉴얼에 있는
+    답을 못 쓰게 된다. 틀렸을 때 더 가벼운 쪽이 기본값이다.
+    """
+    text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S)
+    text = re.sub(r"```(?:json)?", " ", text)
+    i, j = text.find("{"), text.rfind("}")
+    if i < 0 or j <= i:
+        return None
+    try:
+        raw = json.loads(text[i:j + 1])
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(raw, dict):
+        return None
+    mode = "execute" if str(raw.get("mode", "")).strip().lower() == "execute" else "search"
+    srcs = [s for s in ("manual", "voc")
+            if s in {str(x).strip().lower() for x in (raw.get("sources") or [])}]
+    queries = [str(q).strip() for q in (raw.get("queries") or [])
+               if isinstance(q, (str, int, float)) and str(q).strip()][:3]
+    if mode == "search" and not srcs:
+        srcs = ["manual", "voc"]      # 근거를 하나도 안 고르면 검색의 의미가 없다
+    return {"mode": mode, "sources": srcs, "queries": queries}
 
 
 # 선검색을 건너뛴 이유를 모델에게 알려 준다. 아무 말 없이 근거가 비어 있으면 모델은
 # "검색해도 없었다"로 오해하고 지어낸다.
+#
+# 이 블록은 **DB의 지시문과 무관하게 매 요청 프롬프트에 들어간다.** 지시문은 non-force
+# 시드라 콘솔에서 되돌리기 전까지 옛 값이 남는다(#178) — 실행에 꼭 필요한 규칙은 여기 둔다.
 _ROUTED_TO_EXECUTION = (
     "\n\n# 이번 질문에 대한 판단\n"
     "이 질문은 **이 사용자의 현재 값을 실제로 확인해야** 답이 나오는 것으로 판단해, "
-    "매뉴얼·과거 사례를 붙이지 않았습니다. 실행해서 얻은 값으로 답하세요. "
-    "실행 결과만으로 부족하면 그때 `search_manual`·`search_voc`를 직접 부르면 됩니다.\n"
+    "매뉴얼·과거 사례를 붙이지 않았습니다. 실행해서 얻은 값으로 답하세요.\n"
+    "- **묻는 그것을 직접 내주는 커맨드**를 고릅니다. 등록된 도구가 그 값을 정확히 내주지 "
+    "않으면 표준 리눅스 명령을 실행하세요(표준 명령은 일부러 도구로 등록해 두지 않았습니다). "
+    "가까운 도구를 돌려 놓고 그 출력에서 다른 값을 **유추하지 않습니다** — 그건 지어내는 "
+    "것입니다.\n"
+    "- 실행 결과에 답이 없으면 **다른 커맨드로 한 번 더** 확인하세요. 결과에 없는 값을 "
+    "적느니 확인하지 못했다고 답하는 것이 낫습니다.\n"
+    "- 실행 결과만으로 부족하면 그때 `search_manual`·`search_voc`를 직접 부르면 됩니다.\n"
 )
 
 
@@ -1532,12 +1590,13 @@ async def _rag_context(question: str, history: list | None = None) -> tuple[str,
         return "", [], []
     # 실행해야만 답이 나오는 질문에는 **근거를 붙이지 않는다** (#177). 붙이면 모델이 그걸로
     # 답을 만들고 실행을 건너뛴다. 검색 도구는 그대로 남아 있어 필요하면 모델이 부른다.
-    if await _route_needs_execution(question):
+    plan = await _plan_question(question)
+    if plan["mode"] == "execute":
         return _ROUTED_TO_EXECUTION, [], []
     try:
-        mk = int(await get_config("manual_prefetch_top_k", "3"))
+        mk = int(await get_config("manual_prefetch_top_k", "5"))
     except (TypeError, ValueError):
-        mk = 3
+        mk = 5
     try:
         vk = int(await get_config("voc_prefetch_top_k", "3"))
     except (TypeError, ValueError):
@@ -1561,31 +1620,57 @@ async def _rag_context(question: str, history: list | None = None) -> tuple[str,
     bare = _retrieval_query(question, None)
     merged = _retrieval_query(question, history)
 
-    vec = await _embed_once(bare)
+    # **질의를 여러 개로 늘려 후보를 모은다**(멀티 쿼리, #180). 사용자 문장 그대로는
+    # `서버 위치`처럼 짧은 질문에서 문서의 표현(`서버별 Location`)과 어긋난다.
+    # 리랭킹은 **원 질문 기준으로 한 번만** 하므로 비용은 DB 조회뿐이다.
+    extra = [q for q in plan["queries"] if q.strip().lower() != bare.strip().lower()][:2]
+    vecs = await asyncio.gather(_embed_once(bare), *[_embed_once(q) for q in extra])
+    more = [(q, v) for q, v in zip(extra, vecs[1:])]
+    vec = vecs[0]
+
+    want_m = "manual" in plan["sources"]
+    want_v = "voc" in plan["sources"]
     manual_hits, voc_hits = await asyncio.gather(
-        _search_manual_for(bare, max(1, mk), vec),
-        _search_voc_for(bare, max(1, vk), vec),
+        _search_manual_for(bare, max(1, mk), vec, more) if want_m else _none(),
+        _search_voc_for(bare, max(1, vk), vec, more) if want_v else _none(),
     )
-    if merged != bare and not (manual_hits and voc_hits):
+    manual_hits, voc_hits = manual_hits or [], voc_hits or []
+    # 고른 쪽이 빈손이면 **다른 쪽도 본다.** 라우터가 근거를 잘못 골랐을 때 답이 통째로
+    # 없어지는 것보다, 한 번 더 찾아보는 쪽이 싸다.
+    if want_m and not manual_hits and not want_v:
+        voc_hits = await _search_voc_for(bare, max(1, vk), vec, more)
+    elif want_v and not voc_hits and not want_m:
+        manual_hits = await _search_manual_for(bare, max(1, mk), vec, more)
+
+    # 그래도 한 건도 없으면 **직전 발화를 붙여** 한 번 더 (#163). "그러면 접속 못 하는거
+    # 아니야?"처럼 이번 문장에 검색할 명사가 없는 이어지는 질문을 위한 것이다.
+    if merged != bare and not manual_hits and not voc_hits:
         rvec = await _embed_once(merged)
         retry_m, retry_v = await asyncio.gather(
-            _search_manual_for(merged, max(1, mk), rvec) if not manual_hits else _none(),
-            _search_voc_for(merged, max(1, vk), rvec) if not voc_hits else _none(),
+            _search_manual_for(merged, max(1, mk), rvec),
+            _search_voc_for(merged, max(1, vk), rvec),
         )
         if retry_m or retry_v:
             print(f"[agent] 선검색 재시도(직전 발화 포함): 매뉴얼 {len(retry_m or [])}건 · "
                   f"VOC {len(retry_v or [])}건")
-        manual_hits = manual_hits or retry_m or []
-        voc_hits = voc_hits or retry_v or []
+        manual_hits, voc_hits = retry_m or [], retry_v or []
 
     ms = int((time.monotonic() - t0) * 1000)
     print(f"[agent] 선검색 매뉴얼 {len(manual_hits)}건 · VOC {len(voc_hits)}건 ({ms}ms)")
 
-    block = _manual_block(manual_hits) + _voc_block(voc_hits)
+    # **고르지 않은 근거의 블록은 아예 붙이지 않는다.** 빈 블록을 넣으면 모델이 "찾아봤는데
+    # 없었다"로 읽고, 실제로 "매뉴얼에는 없는 내용입니다"로 답을 끝냈다(#179).
+    block = ""
+    if want_m or manual_hits:
+        block += _manual_block(manual_hits)
+    if want_v or voc_hits:
+        block += _voc_block(voc_hits)
     block += ("\n\n위 근거로 답을 만들 수 없으면 **다른 표현으로** `search_manual` 또는 "
               "`search_voc`를 다시 부르세요. 그래도 없으면 지어내지 말고 확인되지 않는다고 "
               "답합니다.")
     return block, manual_hits, voc_hits
+
+
 async def _summarize_turns(turns: list[dict]) -> list[str]:
     """대화 턴들에서 '이 사용자에 대해 기억할' 사실/선호를 vLLM으로 뽑아 한 줄씩 반환한다."""
     base = await get_config("vllm_llm_base_url")

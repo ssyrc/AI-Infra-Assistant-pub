@@ -205,14 +205,31 @@ async def _attach_neighbors(pool, results: list[dict], window: int) -> list[dict
     return results
 
 
+def merge_candidates(base: list[dict], extra: list[dict], cap: int) -> list[dict]:
+    """여러 질의의 후보를 **id 기준으로 합친다**(먼저 온 질의가 앞).
+
+    멀티 쿼리 검색(#180)의 핵심이다. 질의마다 리랭킹까지 따로 돌리면 리랭커 왕복이 질의 수만큼
+    늘어난다. 대신 **후보만 모아서 리랭킹은 원 질문 기준으로 한 번** 한다 — 회수율은 질의 수
+    만큼 늘고, 비용은 DB 조회뿐이다.
+    """
+    seen = {c.get("id"): c for c in base}
+    for c in extra:
+        if c.get("id") not in seen:
+            seen[c["id"]] = c
+    return list(seen.values())[:cap]
+
+
 async def search_manual_chunks(query: str, top_k: int = 5, *,
-                               with_neighbors: bool = True, vec=None
+                               with_neighbors: bool = True, vec=None, more=None
                                ) -> tuple[str, list[dict]]:
     """(mode, 결과리스트)를 돌려준다. Manual MCP와 콘솔 검색 테스트의 공통 진입점.
 
     `vec`을 주면 임베딩을 다시 부르지 않는다 (#165). 선검색은 **같은 질의로** 매뉴얼과 VOC를
     동시에 찾는데, 각자 임베딩을 부르면 같은 문장을 두 번 벡터로 만든다. 임베딩 서버 왕복이
     선검색 지연(2~3초)의 큰 몫이라 한 번으로 줄인다.
+
+    `more=[(질의, 벡터), …]`를 주면 그 질의들로도 후보를 모아 합친다(#180). 리랭킹·중복 제거는
+    **원 질문(`query`) 기준으로 한 번만** 돈다.
     """
     from db import get_pool
 
@@ -227,6 +244,13 @@ async def search_manual_chunks(query: str, top_k: int = 5, *,
     pool = await get_pool(_DSN)
 
     mode, candidates = await _candidates(pool, query, candidate_k, vec)
+    for q2, v2 in (more or []):
+        try:
+            _m, extra = await _candidates(pool, q2, candidate_k, v2)
+        except Exception as e:  # noqa: BLE001
+            print(f"[manual-search] 보조 질의 실패(무시) {q2!r}: {type(e).__name__}: {e}")
+            continue
+        candidates = merge_candidates(candidates, extra, candidate_k * 3)
     if not candidates:
         log_stages("manual-search", query, 0, 0, 0)
         return mode, []

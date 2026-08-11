@@ -12,6 +12,7 @@ from db import (
     get_pool, embed_text, vector_literal, rerank, clamp_top_k, clamp_candidates,
 )
 from pii import mask_record
+from manual_search import merge_candidates
 from config_store import get_config
 from retrieval import (
     ts_or_query, expand_query, has_trgm, mmr_dedup, trgm_min_similarity, log_stages,
@@ -57,20 +58,8 @@ def classify_handling(answer: str | None) -> str:
     return "unknown"
 
 
-async def search_voc_records(query: str, top_k: int = 5, *, vec=None) -> list[dict]:
-    """VOC MCP와 agent-server 선검색의 공통 진입점.
-
-    `vec`을 주면 임베딩을 다시 부르지 않는다 (#165) — 선검색은 매뉴얼과 **같은 질의**를 쓰므로
-    벡터를 한 번만 만들어 나눠 쓴다.
-    """
-    if not query or not query.strip():
-        return []
-    top_k = await clamp_top_k(top_k)
-    # 매뉴얼과 같은 이유로 후보에 하한을 둔다(#179) — 프롬프트에 넣을 건수를 줄인 것이
-    # 검색 회수율까지 깎으면 안 된다.
-    candidate_k = await clamp_candidates(max(top_k * 5, 25))
-    pool = await get_pool(_DSN)
-
+async def _candidates(pool, query: str, candidate_k: int, vec) -> list[dict]:
+    """질의 하나로 후보를 모은다(리랭킹 전). 멀티 쿼리(#180)가 이걸 여러 번 부른다."""
     if vec is None:
         try:
             vec = await embed_text(query)
@@ -162,7 +151,34 @@ async def search_voc_records(query: str, top_k: int = 5, *, vec=None) -> list[di
             vector_literal(vec), ts_query, candidate_k,
         )
 
-    candidates = [dict(r) for r in rows]
+    return [dict(r) for r in rows]
+
+
+async def search_voc_records(query: str, top_k: int = 5, *, vec=None, more=None) -> list[dict]:
+    """VOC MCP와 agent-server 선검색의 공통 진입점.
+
+    `vec`을 주면 임베딩을 다시 부르지 않는다 (#165) — 선검색은 매뉴얼과 **같은 질의**를 쓰므로
+    벡터를 한 번만 만들어 나눠 쓴다.
+
+    `more=[(질의, 벡터), …]`를 주면 그 질의로도 후보를 모아 합친다. 리랭킹은 **원 질문 기준으로
+    한 번만** 돈다(#180) — 매뉴얼 쪽과 같은 구조다.
+    """
+    if not query or not query.strip():
+        return []
+    top_k = await clamp_top_k(top_k)
+    # 매뉴얼과 같은 이유로 후보에 하한을 둔다(#179) — 프롬프트에 넣을 건수를 줄인 것이
+    # 검색 회수율까지 깎으면 안 된다.
+    candidate_k = await clamp_candidates(max(top_k * 5, 25))
+    pool = await get_pool(_DSN)
+
+    candidates = await _candidates(pool, query, candidate_k, vec)
+    for q2, v2 in (more or []):
+        try:
+            extra = await _candidates(pool, q2, candidate_k, v2)
+        except Exception as e:  # noqa: BLE001
+            print(f"[voc-search] 보조 질의 실패(무시) {q2!r}: {type(e).__name__}: {e}")
+            continue
+        candidates = merge_candidates(candidates, extra, candidate_k * 3)
     if not candidates:
         log_stages("voc-search", query, 0, 0, 0)
         return []

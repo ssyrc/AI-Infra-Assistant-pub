@@ -3193,7 +3193,8 @@ def _rag_ns():
         return cfg.get(key, default)
 
     import time as _time
-    ns = {"asyncio": asyncio, "time": _time, "get_config": get_config,
+    ns = {"asyncio": asyncio, "time": _time, "get_config": get_config, "re": re,
+          "json": __import__("json"),
           "_mem_on": lambda v: str(v).lower() == "true"}
     exec(body, ns)  # noqa: S102
     return ns
@@ -3210,11 +3211,11 @@ def test_prefetch_searches_this_question_first_not_the_merged_one():
     ns = _rag_ns()
     seen = []
 
-    async def manual(query, top_k, vec=None):
+    async def manual(query, top_k, vec=None, more=None):
         seen.append(query)
         return [{"chunk_text": f"찾은 것: {query}", "guide_document": "매뉴얼"}]
 
-    async def voc(query, top_k, vec=None):
+    async def voc(query, top_k, vec=None, more=None):
         return [{"question": "q", "answer": "a", "handled_by": "user"}]
 
     ns["_search_manual_for"] = manual
@@ -3232,12 +3233,12 @@ def test_prefetch_falls_back_to_the_merged_query_when_this_question_finds_nothin
     ns = _rag_ns()
     seen = []
 
-    async def manual(query, top_k, vec=None):
+    async def manual(query, top_k, vec=None, more=None):
         seen.append(query)
         return [{"chunk_text": "접속 가이드", "guide_document": "접속 매뉴얼"}] \
             if "\n" in query else []           # 이번 질문만으로는 못 찾는 상황
 
-    async def voc(query, top_k, vec=None):
+    async def voc(query, top_k, vec=None, more=None):
         return []
 
     ns["_search_manual_for"] = manual
@@ -3257,7 +3258,7 @@ def test_prefetch_does_not_retry_when_both_sides_found_something():
     ns = _rag_ns()
     calls = {"n": 0}
 
-    async def hit(query, top_k, vec=None):
+    async def hit(query, top_k, vec=None, more=None):
         calls["n"] += 1
         return [{"chunk_text": "본문", "question": "q", "answer": "a"}]
 
@@ -3455,9 +3456,10 @@ def test_prefetch_embeds_the_query_once_not_twice():
     선검색이 2.9~3.0초 걸린 것의 한 몫이다 (#165)."""
     src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
     body = src[src.index("async def _rag_context("):src.index("async def _summarize_turns")]
-    assert body.count("_embed_once(bare)") == 1, "질의 벡터를 한 번만 만들어야 한다"
-    assert "_search_manual_for(bare, max(1, mk), vec)" in body
-    assert "_search_voc_for(bare, max(1, vk), vec)" in body, "VOC가 벡터를 다시 만든다"
+    # 질의 하나에 임베딩 하나. 매뉴얼과 VOC는 **같은 벡터**를 나눠 쓴다.
+    assert "vecs = await asyncio.gather(_embed_once(bare)" in body
+    assert "_search_manual_for(bare, max(1, mk), vec, more)" in body
+    assert "_search_voc_for(bare, max(1, vk), vec, more)" in body, "VOC가 벡터를 다시 만든다"
 
 
 # --- #171: 남의 계정은 답변에 나오면 안 된다 -------------------------------------------
@@ -3554,6 +3556,120 @@ def test_manual_results_mask_accounts_on_every_path():
     assert "인프라팀" in out and "홍길동" in out and "other.user" not in out, out
 
 
+# --- #180: 질의를 다시 쓰고, 필요한 근거만 보고, 도구 호출을 기록한다 --------------------
+def test_extra_queries_reach_the_search(monkeypatch=None):
+    """`서버 위치`로 찾으면 문서의 `서버별 Location` 표가 안 걸린다. 사용자 문장을 그대로
+    질의로 쓰던 것을 고친다 — 계획이 준 다른 표현으로도 후보를 모은다 (#180)."""
+    ns = _rag_ns()
+    got = {}
+
+    async def plan(_q):
+        return {"mode": "search", "sources": ["manual"],
+                "queries": ["서버 위치", "서버별 Location"]}
+
+    async def manual(query, top_k, vec=None, more=None):
+        got["query"], got["more"] = query, more
+        return [{"chunk_text": "표", "guide_document": "인프라"}]
+
+    async def voc(query, top_k, vec=None, more=None):
+        got["voc_called"] = True
+        return []
+
+    ns["_plan_question"] = plan
+    ns["_search_manual_for"] = manual
+    ns["_search_voc_for"] = voc
+    asyncio.run(ns["_rag_context"]("서버 위치 알려줘"))
+
+    assert got["query"] == "서버 위치 알려줘", "원 질문으로도 찾아야 한다(리랭킹 기준)"
+    assert [q for q, _v in (got["more"] or [])] == ["서버 위치", "서버별 Location"], got["more"]
+
+
+def test_only_the_chosen_source_is_searched():
+    """사용자: "왜 manual_mcp, voc_mcp 는 항상 같이 실행되지?" — 필요한 것만 본다 (#180)."""
+    ns = _rag_ns()
+    calls = []
+
+    async def plan(_q):
+        return {"mode": "search", "sources": ["manual"], "queries": []}
+
+    async def manual(query, top_k, vec=None, more=None):
+        calls.append("manual")
+        return [{"chunk_text": "본문", "guide_document": "문서"}]
+
+    async def voc(query, top_k, vec=None, more=None):
+        calls.append("voc")
+        return []
+
+    ns["_plan_question"] = plan
+    ns["_search_manual_for"] = manual
+    ns["_search_voc_for"] = voc
+    block, _m, _v = asyncio.run(ns["_rag_context"]("접속 방법이 뭐야"))
+    assert calls == ["manual"], f"안 고른 근거까지 찾았다: {calls}"
+    # 안 본 쪽의 빈 블록을 붙이면 모델이 "찾아봤는데 없었다"로 읽는다(#179).
+    assert "과거 사례(VOC) 검색 결과" not in block, block[:300]
+
+
+def test_wrongly_chosen_source_falls_back_to_the_other():
+    """라우터가 근거를 잘못 골라 0건이면, 답이 통째로 없어지는 것보다 한 번 더 찾는 게 싸다."""
+    ns = _rag_ns()
+    calls = []
+
+    async def plan(_q):
+        return {"mode": "search", "sources": ["manual"], "queries": []}
+
+    async def manual(query, top_k, vec=None, more=None):
+        calls.append("manual")
+        return []
+
+    async def voc(query, top_k, vec=None, more=None):
+        calls.append("voc")
+        return [{"question": "q", "answer": "a", "handled_by": "user"}]
+
+    ns["_plan_question"] = plan
+    ns["_search_manual_for"] = manual
+    ns["_search_voc_for"] = voc
+    _b, _m, voc_hits = asyncio.run(ns["_rag_context"]("증상 문의"))
+    assert "voc" in calls and voc_hits, f"고른 쪽이 빈손인데 다른 쪽을 안 봤다: {calls}"
+
+
+def test_multi_query_candidates_are_merged_but_reranked_once():
+    """질의마다 리랭킹까지 따로 돌리면 리랭커 왕복이 질의 수만큼 는다. **후보만 합치고
+    리랭킹은 원 질문 기준으로 한 번** (#180)."""
+    sys.path.insert(0, os.path.join(ROOT, "shared"))
+    from manual_search import merge_candidates
+    merged = merge_candidates([{"id": 1}, {"id": 2}], [{"id": 2}, {"id": 3}], 10)
+    assert [c["id"] for c in merged] == [1, 2, 3], "중복이 남거나 순서가 뒤집혔다"
+    assert len(merge_candidates([{"id": i} for i in range(10)], [], 4)) == 4, "상한이 없다"
+
+    for mod in ("manual_search", "voc_search"):
+        src = open(os.path.join(ROOT, "shared", f"{mod}.py"), encoding="utf-8").read()
+        body = src[src.index("async def search_"):]
+        assert "merge_candidates(candidates, extra" in body, f"{mod}: 후보를 안 합친다"
+        assert body.count("await rerank(") == 1, f"{mod}: 리랭킹이 여러 번 돈다"
+
+
+def test_tool_calls_and_results_are_logged():
+    """"실행이 안 된다"를 볼 때마다 도구 목록·지시문·프롬프트를 차례로 추측했다.
+    **무엇을 어떤 인자로 불렀고 무엇이 돌아왔는지**가 있으면 로그 한 줄로 갈린다 (#180)."""
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    body = src[src.index("class _Pace:"):src.index("def _tool_status_lines(")]
+    assert "도구 호출:" in body and "도구 결과:" in body, "도구 호출/결과를 안 남긴다"
+    # 실행 결과 원문이 로그를 덮으면 아무도 안 본다.
+    ns = {"json": __import__("json")}
+    exec(src[src.index("def _short("):src.index("class _Pace:")], ns)  # noqa: S102
+    assert len(ns["_short"]({"stdout": "가" * 5000})) < 400
+
+
+def test_execution_rules_ride_along_in_the_injected_block():
+    """지시문은 콘솔에서 되돌리기 전까지 옛 값이 남는다(#178). 실행에 꼭 필요한 규칙은
+    **매 요청 프롬프트에 들어가는 블록**에 둔다 — DB 상태와 무관하게 적용된다 (#180)."""
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    block = src[src.index("_ROUTED_TO_EXECUTION = ("):src.index("async def _rag_context(")]
+    assert "묻는 그것을 직접 내주는 커맨드" in block
+    assert "표준 리눅스 명령을 실행" in block, "표준 명령을 써도 된다는 말이 없다"
+    assert "유추하지 않습니다" in block, "가까운 도구 결과로 유추하는 것을 안 막는다"
+
+
 # --- #179: 선검색이 모델의 직접 검색을 **대신하면서 회수율이 떨어졌다** ------------------
 def test_candidate_pool_does_not_shrink_with_prompt_budget():
     """`top_k`는 **프롬프트에 몇 건을 넣을까**이지 **검색을 얼마나 뒤질까**가 아니다.
@@ -3615,7 +3731,7 @@ def test_the_question_being_answered_is_pinned_in_the_prompt():
     주는 것**은 다르다."""
     src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
     ns = {}
-    exec(src[src.index("def _now_asking("):src.index("_ROUTE_PROMPT = ")], ns)  # noqa: S102
+    exec(src[src.index("def _now_asking("):src.index("_PLAN_PROMPT = ")], ns)  # noqa: S102
     out = ns["_now_asking"]("cpu, gpu 서버별 위치 알려줘")
     assert "# 이번에 답할 질문" in out and "cpu, gpu 서버별 위치 알려줘" in out
     assert "이어서 처리하지 마세요" in out, "앞 질문을 이어받지 말라는 말이 없다"
@@ -3682,7 +3798,7 @@ def test_instruction_does_not_invent_a_help_desk():
 # --- #177: 실행해야 답이 나오는 질문에는 **근거를 붙이지 않는다** ------------------------
 def _rag_src():
     src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
-    return src[src.index("_ROUTE_PROMPT = "):src.index("async def _summarize_turns")]
+    return src[src.index("_PLAN_PROMPT = "):src.index("async def _summarize_turns")]
 
 
 def test_prefetch_is_skipped_when_the_answer_needs_execution():
@@ -3692,30 +3808,43 @@ def test_prefetch_is_skipped_when_the_answer_needs_execution():
 
     근거가 눈앞에 있으면 모델은 그것으로 답한다. 그러니 그런 질문에는 붙이지 않는다."""
     body = _rag_src()
-    assert "if await _route_needs_execution(question):" in body, "라우팅을 하지 않는다"
-    i = body.index("await _route_needs_execution(question)")
+    assert 'if plan["mode"] == "execute":' in body, "계획을 보고 갈리지 않는다"
+    i = body.index("plan = await _plan_question(question)")
     j = body.index("manual_hits, voc_hits = await asyncio.gather")
-    assert i < j, "선검색을 다 하고 나서 라우팅하면 느린 것도 그대로다"
+    assert i < j, "선검색을 다 하고 나서 판단하면 느린 것도 그대로다"
     assert "return _ROUTED_TO_EXECUTION, [], []" in body, "건너뛸 때 아무 말도 안 한다"
 
 
-def test_routing_defaults_to_search_when_it_cannot_decide():
-    """잘못 `실행`으로 보내면 매뉴얼에 있는 답을 못 쓴다. 잘못 `검색`으로 보내도 도구는
-    그대로 붙어 있어 모델이 실행할 수 있다. **틀렸을 때 가벼운 쪽이 기본값이다** (#177)."""
-    body = _rag_src()
-    assert '확실하지 않으면 `검색`' in body, "애매할 때의 기본값을 정하지 않았다"
-    # 실패·미설정은 전부 선검색(지금까지의 동작)으로 떨어져야 한다.
-    fn = body[body.index("async def _route_needs_execution"):body.index("_ROUTED_TO_EXECUTION = ")]
-    assert fn.count("return False") >= 3, "실패·미설정일 때 실행으로 보내면 안 된다"
-    assert 'hit = text.startswith("실행")' in fn, "응답을 관대하게 해석하면 오분류가 는다"
+def test_planner_defaults_to_search_when_it_cannot_decide():
+    """잘못 `execute`로 보내면 매뉴얼에 있는 답을 못 쓴다. 잘못 `search`로 보내도 도구는
+    그대로 붙어 있어 모델이 실행할 수 있다. **틀렸을 때 가벼운 쪽이 기본값이다** (#177·#180).
+
+    파서를 **실제로 돌려** 확인한다 — 모양 검사로는 관대해진 것을 못 잡는다."""
+    ns = _rag_ns()
+    parse = ns["_parse_plan"]
+    assert parse("") is None and parse("설명만 하고 JSON은 없음") is None
+    assert parse('{"mode":"execute","sources":[],"queries":[]}')["mode"] == "execute"
+    # execute 로 읽히면 안 되는 것들
+    for text in ('{"mode":"실행"}', '{"mode":"exec"}', '{"mode":"EXECUTE_MAYBE"}',
+                 '{"queries":["x"]}'):
+        assert parse(text)["mode"] == "search", text
+    # 근거를 하나도 안 고르면 둘 다 본다(검색인데 볼 곳이 없으면 답이 없다).
+    assert parse('{"mode":"search","sources":[]}')["sources"] == ["manual", "voc"]
+    # 코드펜스·think 블록이 섞여도 읽는다.
+    got = parse('<think>음</think>```json\n{"mode":"search","sources":["manual"],'
+                '"queries":["서버 위치","서버별 Location"]}\n```')
+    assert got["sources"] == ["manual"] and len(got["queries"]) == 2
+
+    # 설정이 없거나 호출이 실패하면 지금까지의 동작(검색·양쪽)으로 떨어진다.
+    plan = asyncio.run(ns["_plan_question"]("아무 질문"))
+    assert plan["mode"] == "search" and plan["sources"] == ["manual", "voc"]
 
 
-def test_routing_prompt_gives_a_criterion_not_a_list_of_phrasings():
+def test_planner_prompt_gives_a_criterion_not_a_list_of_phrasings():
     """질문 형태를 나열하면 목록에 없는 표현이 올 때 또 뚫린다(#145·#149와 같은 규칙).
     **판별 기준을 주고 모델이 적용하게 한다** (#177)."""
     body = _rag_src()
-    prompt = body[body.index("_ROUTE_PROMPT = "):body.index("async def _route_needs_execution")]
-    assert "판단 기준" in prompt
+    prompt = body[body.index("_PLAN_PROMPT = "):body.index("async def _plan_question")]
     for phrasing in ("보여줘", "알려줘", "어디야", "얼마야", "몇 개야"):
         assert phrasing not in prompt, f"질문 형태를 나열하고 있다: {phrasing}"
 
@@ -3779,3 +3908,17 @@ def test_public_tree_never_ships_an_empty_vendor_dir():
     out = os.path.join(ROOT, "dist", "public", "admin_console", "frontend", "vendor")
     if os.path.isdir(os.path.join(ROOT, "dist", "public")):
         assert not os.path.exists(out), "생성된 공개 트리에 vendor 껍데기가 남아 있다"
+
+
+def test_keyword_axis_uses_prefix_match_for_korean_compounds():
+    """`서버 위치`로 찾으면 문서의 `서버별 Location`이 안 걸렸다. `simple` 사전은 형태소
+    분석을 하지 않아 `서버`와 `서버별`이 **다른 lexeme**이다 — 키워드 축이 통째로 헛돌았다.
+    접두 질의(`서버:*`)로 바꾼다 (#180)."""
+    sys.path.insert(0, os.path.join(ROOT, "shared"))
+    from retrieval import ts_or_query
+    q = ts_or_query("서버 위치")
+    assert q == "서버:* | 위치:*", q
+    assert ts_or_query("") == "", "빈 질의는 그대로 비어 있어야 한다(호출부가 축을 건너뛴다)"
+    # 토큰마다 붙어야 한다 - 하나라도 빠지면 그 낱말은 여전히 정확 일치만 된다.
+    for part in ts_or_query("cpu gpu 서버별 위치").split(" | "):
+        assert part.endswith(":*"), part

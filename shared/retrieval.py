@@ -54,10 +54,16 @@ def ts_or_query(query: str) -> str:
     plainto_tsquery는 토큰을 전부 AND로 묶어서, 한국어 문장처럼 조사가 붙은 토큰이 하나라도
     문서에 없으면 결과가 0건이 된다("gpu & 노드 & 접근하려면"). OR로 묶어 부분 일치를 살린다.
     빈 문자열이면 호출부가 키워드 축을 건너뛰면 된다.
+
+    한국어는 **붙여 쓴 뒤 조사가 붙는다** - `서버 위치`로 찾으면 문서의 `서버별`은 다른
+    lexeme이라 키워드 축이 통째로 헛돈다(`simple` 사전은 형태소 분석을 하지 않는다).
+    그래서 각 토큰을 **접두 질의(`서버:*`)** 로 만든다: `서버별`·`서버들`·`서버의`가 다 걸린다.
+    영어 토큰에도 같은 이득이 있다(`location` ← `locations`). 과잉 매칭은 RRF의 한 축일
+    뿐이고 리랭커가 다시 거른다 - 반대로 **못 찾은 것은 되살릴 방법이 없다** (#180).
     """
     toks = [_UNSAFE_TS.sub("", t) for t in tokens_of(query)]
     toks = [t for t in toks if len(t) >= 2]
-    return " | ".join(toks)
+    return " | ".join(f"{t}:*" for t in toks)
 
 
 def expand_query(query: str, max_variants: int = 3) -> list[str]:
