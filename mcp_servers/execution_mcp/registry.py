@@ -99,12 +99,23 @@ def estimate_prompt_tokens(descriptions: list[str]) -> tuple[int, int]:
     return chars, tokens
 
 
+# 등록 커맨드 설명 끝에 **반드시** 붙는 한 줄 (#181).
+#
+# 왜 도구마다 되풀이하나: 모델은 **자기가 고른 도구의 설명**을 읽는다. `내 홈 경로`에
+# 이름이 비슷한 할당량 조회 도구를 부르고 그 출력에서 경로를 유추한 사고가 그것이다.
+# "이 도구는 이 커맨드의 출력만 준다"를 그 자리에 적어 두면, 다른 값을 물었을 때
+# 이 도구가 답이 아니라는 것이 도구 설명 안에서 드러난다. 한 줄값은 그만큼 한다.
+_ONLY_THIS = "이 커맨드의 출력만 돌려준다. 다른 값을 묻는다면 run_command로 알맞은 명령을 실행할 것."
+
+
 def _describe(row: dict) -> str:
     """LLM에 보일 설명. **짧게** - 툴 하나당 설명이 통째로 매 요청에 실린다(#108).
     공통 규칙("본인 권한으로 실행된다" 등)은 지시문에 한 번만 두고 여기서는 뺀다."""
-    parts = [(row.get("description") or "").strip()]
-    parts.append(f"[{row['exec_command']}]")
-    return " ".join(p for p in parts if p)[:300]
+    head = (row.get("description") or "").strip()
+    # 상한(300자)에 걸려 마지막 한 줄이 잘려 나가지 않도록, 설명 쪽을 먼저 줄인다.
+    tail = f"[{row['exec_command']}] {_ONLY_THIS}"
+    room = max(0, 300 - len(tail) - 1)
+    return " ".join(p for p in (head[:room], tail) if p)
 
 
 def build_entry(row: dict, login_host_getter) -> dict:

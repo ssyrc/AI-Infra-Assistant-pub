@@ -3922,3 +3922,83 @@ def test_keyword_axis_uses_prefix_match_for_korean_compounds():
     # 토큰마다 붙어야 한다 - 하나라도 빠지면 그 낱말은 여전히 정확 일치만 된다.
     for part in ts_or_query("cpu gpu 서버별 위치").split(" | "):
         assert part.endswith(":*"), part
+
+
+# --- #181: 근거가 잘려 나가고, 결과를 못 풀고, 이름 있는 도구로 쏠린다 -------------------
+def test_neighbors_never_squeeze_out_the_matched_chunk():
+    """`서버별 Location` 표를 찾아 놓고도 답에 위치가 없었다 (#181).
+
+    이웃 청크를 [앞·본문·뒤]로 이어 붙인 **뒤에** 앞에서부터 잘랐다. 앞 청크가 예산을 다 먹고
+    **정작 검색에 걸린 본문이 사라진다** — 표 머리글까지만 남고 값이 든 행이 잘렸다."""
+    sys.path.insert(0, os.path.join(ROOT, "shared"))
+    import importlib
+    ms = importlib.import_module("manual_search")
+
+    rows = [{"manual_file_id": 1, "seq": s, "page_no": s, "doc_title": "가이드",
+             "chunk_text": t}
+            for s, t in ((1, "앞" * 900), (2, "본문" * 10), (3, "뒤" * 900))]
+
+    class FakePool:
+        async def fetch(self, *_a, **_k):
+            return rows
+
+    hit = dict(rows[1])
+    out = asyncio.run(ms._attach_neighbors(FakePool(), [hit], 1, 1500))
+    text = out[0]["chunk_text"]
+    assert "본문" * 10 in text, "찾은 본문이 이웃에 밀려났다"
+    assert len(text) <= 1500, f"예산을 넘겼다({len(text)}자)"
+
+    # 예산이 넉넉하면 앞뒤가 다 붙는다(원래 목적: 절차 중간 단계가 빠지지 않게).
+    wide = asyncio.run(ms._attach_neighbors(FakePool(), [dict(rows[1])], 1, 10000))
+    assert wide[0]["chunk_text"].startswith("앞") and wide[0]["chunk_text"].endswith("뒤")
+
+    # 예산을 읽는 것이 이웃을 붙이기 **전**이어야 한다.
+    src = open(os.path.join(ROOT, "shared", "manual_search.py"), encoding="utf-8").read()
+    body = src[src.index("async def search_manual_chunks("):]
+    assert body.index('get_config("manual_result_max_chars"') < body.index("_attach_neighbors(pool"), \
+        "예산을 이웃 확장 뒤에 읽으면 다시 본문이 잘린다"
+
+
+def test_mcp_list_results_are_unwrapped():
+    """MCP는 결과를 `{"content":[{"type":"text","text":"{…}"}]}`로 준다. 리스트를 못 풀어서
+    실행 시간이 늘 `0.0초`로 찍히고, 상태 문장도 결과를 못 봤다 (#181)."""
+    import json as _json
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    ns = {"json": _json, "re": re}
+    exec(src[src.index("def _unwrap_result("):src.index("def _result_phrase(")], ns)  # noqa: S102
+    inner = _json.dumps({"exit_code": 0, "stdout": "a\n", "duration_ms": 3997})
+    got = ns["_unwrap_result"]({"content": [{"type": "text", "text": inner}]})
+    assert isinstance(got, dict) and got["duration_ms"] == 3997, got
+    # 예전 형태도 그대로 풀려야 한다.
+    assert ns["_unwrap_result"]({"result": {"exit_code": 1}})["exit_code"] == 1
+    assert ns["_unwrap_result"]({"content": []}) == []      # 터지지 않는다
+
+    # 시간 합산이 같은 규칙을 쓰는지(따로 풀면 또 어긋난다).
+    pace = src[src.index("class _Pace:"):src.index("def _tool_status_lines(")]
+    assert "_unwrap_result(fr.response)" in pace, "_Pace가 자기 방식으로 푼다"
+
+
+def test_generic_executor_is_offered_first():
+    """모델은 이름이 붙은 전용 도구를 먼저 고른다. `내 홈 경로`에 `pwd` 대신 할당량 조회
+    도구를 부른 것이 그것이다 — 목록의 첫 자리를 일반 실행기에 준다 (#181)."""
+    src = open(os.path.join(ROOT, "mcp_servers", "execution_mcp", "server.py"),
+               encoding="utf-8").read()
+    assert "ALL_TOOLS = {**FREE_TOOLS, **REGISTERED}" in src, "등록 도구가 앞에 온다"
+
+
+def test_registered_tool_says_it_only_returns_its_own_output():
+    """모델은 **자기가 고른 도구의 설명**을 읽는다. 거기에 "이 커맨드의 출력만 준다"가
+    있어야 다른 값을 물었을 때 이 도구가 답이 아님이 드러난다 (#181)."""
+    sys.path.insert(0, os.path.join(ROOT, "mcp_servers", "execution_mcp"))
+    from registry import _describe
+    desc = _describe({"description": "내 스토리지 할당량 조회", "exec_command": "myquota"})
+    assert "[myquota]" in desc and "run_command" in desc, desc
+    # 설명이 아무리 길어도 마지막 한 줄은 살아남아야 한다(상한에 잘리면 무의미).
+    long = _describe({"description": "설" * 500, "exec_command": "phd list {option}"})
+    assert long.endswith("실행할 것.") and "[phd list {option}]" in long
+    assert len(long) <= 300
+
+    # 진행 줄 파서가 그 형식을 읽을 수 있어야 한다(어긋나면 `-l 실행 중`이 된다).
+    main = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    pat = re.compile(re.search(r'_CMD_IN_DESC = re\.compile\(r"(.+?)"\)', main).group(1))
+    assert pat.findall(long)[-1] == "phd list {option}", pat.findall(long)

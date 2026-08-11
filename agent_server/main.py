@@ -102,7 +102,10 @@ _TOOL_KIND: dict[str, str] = {}
 # **실행할 커맨드**를 붙여 준다(`registry._describe`). 그걸 잡아 두면 진행 줄에 도구 이름이
 # 아니라 `myquota -h`처럼 **사용자가 아는 커맨드**를 보여줄 수 있다(#166).
 _TOOL_CMD: dict[str, str] = {}
-_CMD_IN_DESC = re.compile(r"\[([^\[\]]+)\]\s*$")
+# 등록 커맨드 설명에 든 `[phd list {option}]`. **끝에 있다고 가정하지 않는다** —
+# 설명 뒤에 공통 문구가 붙으면서(#181) `…$` 앵커가 어긋나 진행 줄이 인자만 보여 줬다
+# (`-l 실행 중`). 마지막 대괄호 묶음을 커맨드로 본다.
+_CMD_IN_DESC = re.compile(r"\[([^\[\]]+)\]")
 
 
 async def _log_tool_inventory(toolsets: list):
@@ -120,10 +123,10 @@ async def _log_tool_inventory(toolsets: list):
             names = [getattr(t, "name", "?") for t in tools]
             for tool, n in zip(tools, names):
                 _TOOL_KIND[n] = kind
-                m = _CMD_IN_DESC.search(getattr(tool, "description", "") or "")
-                if kind == "execution" and m:
+                found = _CMD_IN_DESC.findall(getattr(tool, "description", "") or "")
+                if kind == "execution" and found:
                     # 자리표시자는 뺀다 - 실제 값은 호출 인자에서 붙인다.
-                    base = re.sub(r"\{[^}]*\}", "", m.group(1)).split()
+                    base = re.sub(r"\{[^}]*\}", "", found[-1]).split()
                     if base:
                         _TOOL_CMD[n] = " ".join(base)
             head = ", ".join(names[:12]) + (" …" if len(names) > 12 else "")
@@ -464,18 +467,29 @@ def _unwrap_result(resp):
     한두 겹 감싸여 오거나(`{"result": {...}}`) JSON 문자열로 올 수 있다. 안쪽을 못 찾으면
     실행 툴인데도 "확인 완료"로 보여서 성공/실패를 알 수 없다. 상태 문장과 원문 블록이
     **같은 규칙**으로 풀어야 해서 함수로 뺐다(어긋나면 한쪽만 결과를 못 찾는다).
+
+    MCP는 결과를 **리스트로** 감싸 준다: `{"content":[{"type":"text","text":"{…JSON…}"}]}`.
+    예전에는 `dict`나 `str`만 벗겨서 이 형태를 못 풀었다 — 실행 결과가 있는데도 상태 문장이
+    `확인 완료`로만 나오고, 실행 시간이 늘 `0.0초`로 찍히고, 원문 블록도 붙지 않았다(#181).
     """
     r = resp
-    for _ in range(3):
+    for _ in range(4):
         if isinstance(r, str):
             try:
                 r = json.loads(r)
                 continue
             except (ValueError, TypeError):
                 break
+        if isinstance(r, list):
+            # `[{"type":"text","text":"…"}, …]` — 텍스트 조각을 이어 붙여 다시 푼다.
+            texts = [p.get("text") for p in r if isinstance(p, dict) and p.get("text")]
+            if not texts:
+                break
+            r = "".join(texts)
+            continue
         if isinstance(r, dict) and "exit_code" not in r and "stdout" not in r:
             inner = r.get("result", r.get("content"))
-            if isinstance(inner, (dict, str)):
+            if isinstance(inner, (dict, str, list)):
                 r = inner
                 continue
         break
@@ -867,11 +881,10 @@ class _Pace:
             self.tool_calls += 1
             print(f"[agent] {self.request_id} 도구 호출: {fc.name} {_short(fc.args)}")
         for fr in (event.get_function_responses() or []):
-            resp = fr.response
-            if not isinstance(resp, dict):
-                print(f"[agent] {self.request_id} 도구 결과: {fr.name} → {_short(resp)}")
-                continue
-            inner = resp.get("result") if isinstance(resp.get("result"), dict) else resp
+            # MCP 결과는 `{"content":[{"type":"text","text":"{…JSON…}"}]}`로 온다.
+            # 예전에는 `resp["result"]`만 봐서 **커맨드 실행 시간이 항상 0.0초**로 찍혔다
+            # (#181). 상태 문장·원문 블록이 쓰는 것과 **같은 규칙**으로 푼다.
+            inner = _unwrap_result(fr.response)
             if isinstance(inner, dict) and isinstance(inner.get("duration_ms"), int):
                 self.tool_ms += inner["duration_ms"]
             print(f"[agent] {self.request_id} 도구 결과: {fr.name} → {_short(inner)}")

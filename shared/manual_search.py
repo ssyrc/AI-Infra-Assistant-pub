@@ -159,13 +159,16 @@ async def _candidates(pool, query: str, candidate_k: int, vec=None) -> tuple[str
     return "하이브리드 2축(pg_trgm 없음)", [dict(r) for r in rows]
 
 
-async def _attach_neighbors(pool, results: list[dict], window: int) -> list[dict]:
+async def _attach_neighbors(pool, results: list[dict], window: int,
+                            max_chars: int = 0) -> list[dict]:
     """검색된 청크의 앞뒤 청크를 같은 문서에서 가져와 본문에 이어 붙인다.
 
     왜 필요한가: 절차 문서는 한 단계가 한 청크(엑셀/CSV는 한 행 = 한 페이지)라, 검색이
     2단계와 4단계만 집어오면 답변에서 3단계가 통째로 사라진다. 실제로 "슈퍼컴 계정 신청"
     답변에서 중간 단계가 빠지는 문제가 이것이었다. 관련도 순서는 리랭킹 결과 그대로 두고,
     각 결과의 '읽을 범위'만 넓힌다.
+
+    `max_chars`를 주면 **찾은 청크가 잘리지 않는 선에서만** 이웃을 붙인다(#181).
     """
     if window <= 0 or not results:
         return results
@@ -184,21 +187,40 @@ async def _attach_neighbors(pool, results: list[dict], window: int) -> list[dict
     by_key = {(r["manual_file_id"], r["seq"]): dict(r) for r in rows}
     for item in results:
         fid, seq = item["manual_file_id"], item["seq"]
-        parts, pages = [], []
-        for d in range(-window, window + 1):
+        own = item.get("chunk_text") or ""
+        # **찾은 청크의 자리를 먼저 확보한다** (#181). 예전에는 [앞·본문·뒤]를 그냥 이어 붙이고
+        # 나중에 앞에서부터 max_chars로 잘랐다. 그러면 앞 청크가 예산을 다 먹고 **정작 검색에
+        # 걸린 본문이 잘려 나간다.** `서버별 Location` 표를 찾아 놓고도 답에 위치가 없던 것이
+        # 이것이다 - 표 머리글까지만 남고 값이 든 행이 사라졌다.
+        budget = (max_chars - len(own)) if max_chars > 0 else 10 ** 9
+        pages = [item["page_no"]] if item.get("page_no") is not None else []
+        before, after = [], []
+
+        def take(d, bucket, append: bool):
+            nonlocal budget
             nb = by_key.get((fid, seq + d))
-            if not nb:
-                continue
+            if not nb or budget <= 0:
+                return
             # 한 번에 여러 문서를 올린 경우(활용 가이드 메뉴 전체 등) seq는 파일 전체에서
             # 이어지므로, 이웃이 '다른 원본 문서'의 첫/마지막 장일 수 있다. 그걸 이어 붙이면
             # 서로 상관없는 두 가이드가 한 근거로 섞인다 - 문서 경계를 넘지 않는다.
             if nb.get("doc_title") != item.get("doc_title"):
-                continue
-            parts.append(nb["chunk_text"])
+                return
+            text = nb["chunk_text"] or ""
+            if len(text) + 1 > budget:
+                return
+            budget -= len(text) + 1
+            bucket.append(text) if append else bucket.insert(0, text)
             if nb["page_no"] is not None:
                 pages.append(nb["page_no"])
-        if len(parts) > 1:
-            item["chunk_text"] = "\n".join(parts)
+
+        # 뒤(이어지는 단계)를 먼저 채운다 - 절차 문서에서 다음 단계가 더 자주 필요하다.
+        for d in range(1, window + 1):
+            take(d, after, True)
+        for d in range(1, window + 1):
+            take(-d, before, False)
+        if before or after:
+            item["chunk_text"] = "\n".join(before + [own] + after)
             item["expanded_with_neighbors"] = True
             if pages:
                 item["page_range"] = [min(pages), max(pages)]
@@ -269,19 +291,20 @@ async def search_manual_chunks(query: str, top_k: int = 5, *,
     picked = mmr_dedup(ordered, lambda c: c["chunk_text"], top_k, threshold)
     log_stages("manual-search", query, len(candidates), len(ranked), len(picked))
 
+    # 결과 하나가 너무 길면 LLM 컨텍스트가 몇 건 만에 가득 찬다(실제로 32768토큰을 넘겨
+    # ContextWindowExceededError가 났다). **이웃을 붙이기 전에** 예산을 읽는다 - 이웃이
+    # 예산을 다 먹고 정작 찾은 본문이 잘려 나가던 것을 막기 위해서다(#181).
+    try:
+        max_chars = int(await get_config("manual_result_max_chars", "1500"))
+    except (TypeError, ValueError):
+        max_chars = 1500
+
     if with_neighbors:
         try:
             window = int(await get_config("manual_neighbor_window", "1"))
         except (TypeError, ValueError):
             window = 1
-        picked = await _attach_neighbors(pool, picked, max(0, min(window, 3)))
-
-    # 결과 하나가 너무 길면 LLM 컨텍스트가 몇 건 만에 가득 찬다(실제로 32768토큰을 넘겨
-    # ContextWindowExceededError가 났다). 이웃 청크까지 붙은 뒤라 더 길어지므로 여기서 자른다.
-    try:
-        max_chars = int(await get_config("manual_result_max_chars", "1500"))
-    except (TypeError, ValueError):
-        max_chars = 1500
+        picked = await _attach_neighbors(pool, picked, max(0, min(window, 3)), max_chars)
 
     # 답변에 그대로 옮겨 적을 값을 만들어 준다. LLM이 조합하게 두면 순서를 바꾸거나 줄인다.
     #  · guide_location  = 관리자가 넣은 문서 위치(URL 포함). **줄이지 말고 그대로** 써야 한다.

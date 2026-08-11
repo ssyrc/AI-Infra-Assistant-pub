@@ -169,7 +169,10 @@ if _DROPPED:
           "노출하지 못했습니다. 설정에서 상한을 올리거나 쓰지 않는 커맨드를 정리하세요 "
           "- 노출되지 않은 커맨드는 run_command로만 실행할 수 있습니다.")
 
-ALL_TOOLS = {**REGISTERED, **FREE_TOOLS}
+# **`run_command`를 맨 앞에 둔다** (#181). 모델은 이름이 붙은 전용 도구를 먼저 고르는
+# 성향이 강해서, `내 홈 경로`에 `pwd` 대신 이름이 비슷한 할당량 조회 도구를 불렀다.
+# 목록의 첫 자리는 공짜로 얻는 편향이다 — 일반 실행기를 거기 둔다.
+ALL_TOOLS = {**FREE_TOOLS, **REGISTERED}
 _CHARS, _TOKENS = estimate_prompt_tokens(
     [e.get("schema_text") or tool_description(n, e) for n, e in ALL_TOOLS.items()])
 # 툴 설명은 **매 요청** 프롬프트에 통째로 실린다. 컨텍스트가 32768이라 등록이 늘수록
