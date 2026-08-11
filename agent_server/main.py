@@ -54,6 +54,9 @@ from memory_store import (
     list_user_memory, add_user_memory, delete_user_memory,
 )
 from service_hub import search_similar_voc
+# 계정 판정은 마스킹과 **같은 것**을 쓴다. 여기에 정규식을 또 두었더니 한쪽만 고쳐져,
+# 노출 차단은 `말.말`을 잡는데 마스킹은 숫자 없는 계정을 놓쳤다(#176).
+from pii import find_accounts
 from chart_inline import ChartInliner, charts_base_url
 from agent import build_agent, APP_NAME
 
@@ -615,19 +618,6 @@ _PATH_RE = re.compile(r"(?<![\w.])/(?:[\w.@+-]+/){1,}[\w.@+-]*")
 _GUIDE_MARKERS = ("자세한 내용은 다음 문서", "가이드 문서:", "가이드 위치:")
 
 
-# 답변에서 계정처럼 보이는 토큰(`말.말`). `pii._ACCOUNT_RE`는 점 앞에 숫자를 요구해
-# `other.user`을 놓치므로, 노출 차단용으로는 더 넓게 본다.
-_ACCOUNTISH_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_-]{1,15}\.[A-Za-z][A-Za-z0-9_-]{1,20}\b")
-# 계정이 아닌 것: 파일 확장자와 도메인 꼬리. 여기 없는 확장자가 오면 줄 하나가 빠질 뿐이고,
-# 반대 방향(남의 계정 노출)보다 훨씬 가벼운 실패다.
-_NOT_ACCOUNT_SUFFIX = {
-    "py", "sh", "md", "yml", "yaml", "json", "log", "txt", "csv", "tsv", "sql",
-    "html", "js", "css", "svg", "png", "jpg", "tar", "gz", "whl", "cfg", "conf",
-    "ini", "env", "example", "bak", "tmp", "lock", "toml", "xml", "pdf", "xlsx",
-    "com", "net", "org", "io", "kr", "local", "internal", "dev", "test",
-}
-
-
 class _AnswerGuard:
     """근거 없는 답변을 **내보내지 않는다** (#155).
 
@@ -662,13 +652,9 @@ class _AnswerGuard:
         # 전부 막으면 본인 계정이 든 정상 답변까지 사라진다.
         if not self.user_id:
             return []
-        # `pii._ACCOUNT_RE`보다 **넓게** 잡는다. 그건 점 앞에 숫자가 있는 형태만 보므로
-        # `other.user` 같은 계정을 놓친다(마스킹에도 같은 구멍이 있다 — 별건으로 고친다).
-        # 여기서는 파일명·도메인을 접미사로 걸러 내고 나머지 `말.말`을 전부 계정으로 본다.
-        # **거짓 양성(줄 하나가 빠짐)보다 거짓 음성(남의 계정 노출)이 훨씬 나쁘다.**
-        return [m for m in dict.fromkeys(_ACCOUNTISH_RE.findall(answer or ""))
-                if m.strip().lower() != self.user_id
-                and m.rsplit(".", 1)[-1].lower() not in _NOT_ACCOUNT_SUFFIX]
+        # 계정 판정은 마스킹(`pii`)과 같은 것을 쓴다. **거짓 양성(줄 하나가 빠짐)보다
+        # 거짓 음성(남의 계정 노출)이 훨씬 나쁘다**는 무게도 거기 함께 적혀 있다.
+        return [m for m in find_accounts(answer) if m.strip().lower() != self.user_id]
 
     def seed_rag(self, manual_hits: list, voc_hits: list = ()):
         """선검색(`_rag_context`)으로 이미 확보한 근거를 등록한다.
@@ -718,6 +704,19 @@ class _AnswerGuard:
                 "정확하지 않은 정보를 드리지 않기 위해 답변을 드리지 않습니다. "
                 "운영팀에 문의해 주세요." + self._intake_line())
 
+    def foreign_fallback(self) -> str:
+        """남의 계정 얘기밖에 남지 않았을 때의 답 (#176).
+
+        사용자 지시: "다른 사람 계정은 확인 불가하다고 얘기해야 하고, 장애 원인과 해결 방안
+        정도만 몇 가지 유추해서 알려주는 정도는 가능함." 원인·해결 방안은 모델이 쓴 본문에
+        들어 있고 `review`가 그 줄들을 살린다 — 여기까지 오는 것은 **본문 전체가 남의 계정
+        얘기였을 때**뿐이다. 그때는 왜 답할 수 없는지만 분명히 말한다.
+        """
+        print("[agent] 남의 계정에 대한 답변을 차단했습니다.")
+        return ("다른 분의 계정 상태는 확인해 드릴 수 없습니다. "
+                "본인 계정으로 겪고 계신 증상을 알려주시면 확인해 드리겠습니다.\n"
+                "다른 분의 계정 문제는 운영팀으로 접수해 주세요." + self._intake_line())
+
     @property
     def hold(self) -> bool:
         """본문을 흘리지 않고 모아 두어야 하는가.
@@ -747,7 +746,8 @@ class _AnswerGuard:
         if not self.searched_manual and any(k in answer for k in _GUIDE_MARKERS):
             return self.fallback("매뉴얼을 검색하지 않고 문서를 안내함")
         # 남의 계정은 **근거 유무와 무관하게** 막는다(질문 자체가 근거가 되어 버린다).
-        bad = self._foreign_accounts(answer) + self._ungrounded(answer)
+        foreign = self._foreign_accounts(answer)
+        bad = foreign + self._ungrounded(answer)
         if not bad:
             return answer
 
@@ -756,10 +756,16 @@ class _AnswerGuard:
         # 표제·불릿 기호만 남은 껍데기는 답이 아니다. 실질 내용이 남았는지로 판단한다.
         substantive = len(re.sub(r"[\s#\-*>|`0-9.]", "", body)) >= 20
         if not substantive:
+            # 남의 계정 때문에 다 지워졌다면 "확인되지 않았습니다"는 **틀린 설명**이다.
+            # 확인이 안 된 게 아니라 **확인해 드릴 수 없는** 것이다. 그대로 말한다.
+            if foreign:
+                return self.foreign_fallback()
             return self.fallback("조회 결과에 없는 값: " + ", ".join(bad[:8]))
         print(f"[agent] 근거 없는 줄을 덜어냈습니다: {', '.join(bad[:8])}")
-        return (body + "\n\n확인되지 않은 내용은 제외했습니다. "
-                "더 필요하시면 운영팀에 문의해 주세요." + self._intake_line())
+        tail = ("다른 분의 계정에 대해서는 확인해 드릴 수 없어 그 부분을 제외했습니다."
+                if foreign else "확인되지 않은 내용은 제외했습니다.")
+        return (body + "\n\n" + tail +
+                " 더 필요하시면 운영팀에 문의해 주세요." + self._intake_line())
 
 
 async def _make_grounding(question: str, user_id: str = ""):
@@ -1060,7 +1066,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     }
     raw = await _make_raw_outputs()
     ground = await _make_grounding(last_text, user_id)
-    prepared: dict = {"toolsets": [], "found": (0, 0)}
+    prepared: dict = {"toolsets": [], "found": (0, 0), "routed": False}
 
     async def _prepare():
         """선검색 → 에이전트 구성. **스트리밍에서는 진행 줄을 먼저 내보낸 뒤** 부른다 (#163).
@@ -1073,6 +1079,9 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         agent, _model, toolsets = await build_agent(caller_headers, extra)
         prepared["toolsets"] = toolsets
         prepared["found"] = (len(manual_hits), len(voc_hits))
+        # 선검색을 건너뛴 질문에서는 "0건 찾음"이라고 말하면 안 된다 - 찾아봤는데 없었다는
+        # 뜻이 되어 버린다. 아예 찾지 않은 것이다 (#177).
+        prepared["routed"] = rag_block == _ROUTED_TO_EXECUTION
         ground.seed_rag(manual_hits, voc_hits)
         pace.mark_ready()      # 여기까지가 LLM을 부르기 전 준비 시간
         return Runner(agent=agent, app_name=APP_NAME,
@@ -1120,10 +1129,11 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             # 선검색은 도구 호출이 아니라 우리 코드라 진행 줄이 붙을 자리가 없었다(#155).
             # 그래서 2~3초 동안 화면이 비어 있었다. 여기서 **먼저 한 줄 내보내고** 검색한다.
             if show_tools:
-                yield _sse(request_id, model_name, "· 매뉴얼·과거 사례 검색하는 중\n")
+                # 무엇을 할지 아직 모른다(라우팅이 여기서 갈린다) — 하는 일만 정확히 적는다.
+                yield _sse(request_id, model_name, "· 질문 살펴보는 중\n")
                 in_think = True
             runner = await _prepare()
-            if show_tools:
+            if show_tools and not prepared["routed"]:
                 mh, vh = prepared["found"]
                 yield _sse(request_id, model_name,
                            f"· 매뉴얼 {mh}건 · 과거 사례 {vh}건 찾음\n")
@@ -1356,6 +1366,75 @@ def _voc_block(results: list) -> str:
     return "\n".join(lines)
 
 
+_ROUTE_PROMPT = (
+    "다음 문의에 답하려면 **그 사용자의 계정으로 서버에서 커맨드를 실행해 지금의 값을 직접 "
+    "봐야만** 하는지 판단하라.\n"
+    "판단 기준: 그 답이 사용자·계정·시점에 따라 달라지는 **그 사람의 현재 값**인가"
+    "(내 경로·내 사용량·내 작업 목록처럼), 아니면 문서에 적혀 있을 수 있는 "
+    "**방법·정책·원인**인가.\n"
+    "값이면 `실행`, 그 밖이면 `검색`이다. 증상을 호소하거나(안 된다·오류가 난다) 방법·개념을 "
+    "묻는 것은 `검색`이다.\n"
+    "확실하지 않으면 `검색`이라고 답하라.\n"
+    "다른 말 없이 한 단어로만 답하라: 실행 또는 검색\n\n문의: "
+)
+
+
+async def _route_needs_execution(question: str) -> bool:
+    """이 질문이 **실행해야만 답이 나오는 것**인가 (#177).
+
+    사용자 지시: "지금은 무조건 manual, voc mcp 둘다 실행하게끔 되어 있는데, 자유롭게 agent가
+    판단해서, command를 실행해서 확인해야 하는 경우 빼고 전부 매뉴얼이나 과거 사례 검색하게끔
+    해야 해."
+
+    왜 코드에서 한 번 더 묻나: `내 홈스토리지 경로 알려줘`에 선검색이 매뉴얼 3건을 물어다
+    주자, 모델이 거기 적힌 **경로 규칙**으로 답을 만들고 실행을 건너뛰었다("myquota 실행
+    결과를 종합하여" — 부르지도 않았다). 근거가 눈앞에 있으면 모델은 그것으로 답한다.
+    그러니 **그 질문에는 근거를 붙이지 않는 것**이 답이다.
+
+    **판별 기준만 주고 모델이 적용하게 한다**(질문 형태를 나열하지 않는다 - 목록에 없는
+    표현이 오면 또 뚫린다). 그리고 애매하면 `검색`으로 떨어뜨린다 — 잘못 `실행`으로 보내면
+    매뉴얼에 있는 답을 못 쓰지만, 잘못 `검색`으로 보내도 도구는 그대로 붙어 있어 모델이
+    실행할 수 있다. **틀렸을 때 더 가벼운 쪽이 기본값이다.**
+    """
+    if not _mem_on(await get_config("prefetch_route", "true")):
+        return False
+    base = await get_config("vllm_llm_base_url", "")
+    model = await get_config("vllm_llm_model", "")
+    if not base or not model:
+        return False
+    t0 = time.monotonic()
+    try:
+        client = await get_http_client()
+        resp = await client.post(
+            f"{base.rstrip('/')}/chat/completions",
+            json={"model": model,
+                  "messages": [{"role": "user", "content": _ROUTE_PROMPT + question}],
+                  "temperature": 0, "max_tokens": 8},
+            timeout=10)
+        resp.raise_for_status()
+        text = ((resp.json().get("choices") or [{}])[0]
+                .get("message", {}) or {}).get("content") or ""
+    except Exception as e:  # noqa: BLE001
+        # 실패하면 **지금까지의 동작(선검색)** 으로 떨어진다. 라우팅 때문에 답변이 막히면 안 된다.
+        print(f"[agent] 질문 라우팅 실패(선검색으로 진행): {type(e).__name__}: {e}")
+        return False
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+    hit = text.startswith("실행")
+    print(f"[agent] 질문 라우팅: {'실행' if hit else '검색'} "
+          f"({int((time.monotonic() - t0) * 1000)}ms, 응답 {text[:20]!r})")
+    return hit
+
+
+# 선검색을 건너뛴 이유를 모델에게 알려 준다. 아무 말 없이 근거가 비어 있으면 모델은
+# "검색해도 없었다"로 오해하고 지어낸다.
+_ROUTED_TO_EXECUTION = (
+    "\n\n# 이번 질문에 대한 판단\n"
+    "이 질문은 **이 사용자의 현재 값을 실제로 확인해야** 답이 나오는 것으로 판단해, "
+    "매뉴얼·과거 사례를 붙이지 않았습니다. 실행해서 얻은 값으로 답하세요. "
+    "실행 결과만으로 부족하면 그때 `search_manual`·`search_voc`를 직접 부르면 됩니다.\n"
+)
+
+
 async def _rag_context(question: str, history: list | None = None) -> tuple[str, list, list]:
     """**매 질문마다 매뉴얼과 과거 사례를 먼저 검색해 프롬프트에 넣는다** (#155·#156).
 
@@ -1383,6 +1462,10 @@ async def _rag_context(question: str, history: list | None = None) -> tuple[str,
     query = _retrieval_query(question, history)
     if not query.strip():
         return "", [], []
+    # 실행해야만 답이 나오는 질문에는 **근거를 붙이지 않는다** (#177). 붙이면 모델이 그걸로
+    # 답을 만들고 실행을 건너뛴다. 검색 도구는 그대로 남아 있어 필요하면 모델이 부른다.
+    if await _route_needs_execution(question):
+        return _ROUTED_TO_EXECUTION, [], []
     try:
         mk = int(await get_config("manual_prefetch_top_k", "3"))
     except (TypeError, ValueError):

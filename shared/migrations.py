@@ -599,6 +599,10 @@ def config_seed() -> list[tuple[str, str, str, bool, bool, bool]]:
          "매 질문마다 매뉴얼과 과거 사례(VOC)를 먼저 검색해 근거(문서 위치 포함)를 "
          "프롬프트에 넣는다. 모델이 검색을 건너뛰고 지어내는 것을 막는다",
          True, False, False),
+        ("prefetch_route", "true",
+         "질문이 '실행해야만 알 수 있는 값'을 묻는 것이면 매뉴얼·VOC 선검색을 건너뛰고 "
+         "바로 실행하게 한다(LLM에 한 번 묻는다, 애매하면 검색). 끄면 항상 선검색",
+         True, False, False),
         ("manual_prefetch_top_k", "3",
          "매뉴얼 선검색으로 프롬프트에 넣을 근거 문단 수(늘리면 프롬프트가 커진다)",
          True, False, False),

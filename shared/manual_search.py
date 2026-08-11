@@ -13,6 +13,7 @@
 """
 from db import embed_text, vector_literal, rerank, clamp_top_k, clamp_candidates
 from config_store import get_config
+from pii import mask_accounts
 from retrieval import (
     ts_or_query, expand_query, has_trgm, mmr_dedup, trgm_min_similarity, log_stages,
 )
@@ -261,6 +262,11 @@ async def search_manual_chunks(query: str, top_k: int = 5, *,
         item["reference"] = full_reference(item)
         item["guide_location"] = item.get("reference_path") or ""
         item["guide_document"] = item.get("doc_title") or item.get("title") or ""
+        # 매뉴얼에도 남의 계정·이메일이 예시로 박혀 있다("OOO.OO 계정으로 접속"). 그대로
+        # 넘기면 모델이 그것을 **질문한 사람의 계정인 양** 답에 옮긴다(실제로 그랬다).
+        # 조직명·직급은 남긴다 - 절차의 일부라서 지우면 어디에 신청할지 알 수 없게 된다.
+        # 검색이 끝난 뒤에 가리므로 검색 품질(벡터·키워드·리랭킹)에는 영향이 없다.
+        item["chunk_text"] = mask_accounts(item.get("chunk_text"))
         text = item.get("chunk_text") or ""
         if max_chars > 0 and len(text) > max_chars:
             item["chunk_text"] = text[:max_chars] + "\n…(이하 생략, 더 필요하면 get_document)"

@@ -9,6 +9,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../shared"))
 from db import get_pool  # noqa: E402
 from manual_search import search_manual_chunks  # noqa: E402
+from pii import mask_accounts  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP
 
@@ -30,6 +31,7 @@ async def search_manual(query: str, top_k: int = 5) -> list[dict]:
           chunk_text      — 근거 문단(앞뒤 문단 포함). 답변은 이 내용으로만 만든다.
           doc_title, section_title, page_no, manual_file_id, reference(위치+문서명 합본)
     """
+    # 계정 마스킹은 search_manual_chunks 안에서 끝난다(선검색·콘솔과 같은 코드).
     _mode, results = await search_manual_chunks(query, top_k, with_neighbors=True)
     return results
 
@@ -93,7 +95,9 @@ async def get_document(manual_file_id: int, offset: int = 0, limit: int = 20,
         "has_more": returned_end < (total or 0) or truncated,
         "next_offset": returned_end,
         "truncated_by_max_chars": truncated,
-        "chunks": chunks,
+        # 이 도구는 DB를 직접 읽으므로 search_manual_chunks의 마스킹을 거치지 않는다.
+        # 여기서 같은 처리를 한다 - 안 하면 문서를 이어 읽는 경로로 계정이 새어 나간다.
+        "chunks": [{**c, "chunk_text": mask_accounts(c.get("chunk_text"))} for c in chunks],
     }
 
 

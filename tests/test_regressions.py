@@ -2376,11 +2376,18 @@ def test_instruction_routing_covers_all_three_mcps():
 def _grounding_cls():
     import json as _json
     import re as _re
+    sys.path.insert(0, os.path.join(ROOT, "shared"))
+    from pii import find_accounts          # 계정 판정은 main.py도 여기서 가져온다(#176)
     src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
     i = src.index("_IP_RE = re.compile")
-    ns = {"json": _json, "re": _re, "_mem_on": lambda x: True}
+    ns = {"json": _json, "re": _re, "_mem_on": lambda x: True,
+          "find_accounts": find_accounts}
     exec(src[i:src.index("\nclass _Pace:")], ns)
     return ns["_AnswerGuard"]
+
+
+def _guard(*a, **kw):
+    return _grounding_cls()(*a, **kw)
 
 
 _FALLBACK_MARK = "운영팀에 문의해 주세요"
@@ -3316,8 +3323,10 @@ def test_prefetch_runs_inside_the_stream_so_progress_can_be_shown():
     top = body[:body.index("async def _prepare():")]
     assert "await _rag_context(" not in top, \
         "선검색이 스트림 시작 전에 돈다 — 그동안 화면이 빈다"
-    assert "검색하는 중" in gen, "선검색 진행 줄이 없다"
-    assert gen.index("검색하는 중") < gen.index("await _prepare()"), \
+    # 문구는 자유다(#177에서 "검색하는 중" → "질문 살펴보는 중"으로 바뀌었다. 선검색을
+    # 건너뛸 수 있게 되어, 검색한다고 먼저 말하면 거짓말이 된다). 규칙은 **준비 전에 무언가
+    # 한 줄이 나간다**는 것 하나다.
+    assert gen.index("yield _sse(") < gen.index("await _prepare()"), \
         "진행 줄이 선검색 뒤에 나온다(그러면 기다리는 동안 아무것도 안 보인다)"
     # 준비를 제너레이터 안으로 옮기면 toolset 정리가 끊기기 쉽다.
     assert "_close_toolsets(toolsets)" not in body, "정리가 옛 지역변수를 본다(연결 누수)"
@@ -3459,12 +3468,7 @@ def test_answer_never_repeats_someone_elses_account():
     VOC 검색 결과는 `pii.mask_record`가 이미 가린다. 남은 구멍은 **질문에 적힌 남의 계정을
     답변이 되뇌는 것**이라, 근거 유무로는 못 막는다(질문 자체가 근거다).
     호출자 본인 계정이 아니면 그 줄을 덜어낸다."""
-    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
-    sys.path.insert(0, os.path.join(ROOT, "shared"))
-    import json as _json
-    ns = {"re": re, "json": _json}
-    exec(src[src.index("_IP_RE = "):src.index("async def _make_grounding(")], ns)  # noqa: S102
-    g = ns["_AnswerGuard"](True, "other.user 으로 접속이 불가합니다", user_id="ops.user")
+    g = _guard(True, "other.user 으로 접속이 불가합니다", user_id="ops.user")
     g.searched_manual = True
 
     out = g.review("귀하의 계정(other.user)으로 접속이 불가한 사례가 있습니다.\n"
@@ -3475,6 +3479,166 @@ def test_answer_never_repeats_someone_elses_account():
     # 본인 계정은 그대로 나가야 한다.
     keep = g.review("ops.user 님의 홈은 정상입니다. 확인해 보세요.")
     assert "ops.user" in keep
+
+
+# --- #176: 마스킹과 노출 차단이 **같은 계정 판정**을 써야 한다 ---------------------------
+def _pii():
+    sys.path.insert(0, os.path.join(ROOT, "shared"))
+    import pii
+    return pii
+
+
+def test_masking_catches_accounts_without_digits():
+    """`pii`의 계정 패턴이 **점 앞의 숫자를 요구**해서(`ops.user`) `other.user`처럼 숫자 없는
+    계정을 통째로 놓쳤다. VOC 원문에 남의 계정이 그대로 실려 프롬프트에 들어갔다 (#176).
+
+    사용자 지시: "다른 사람 계정명·id·이메일·이름은 절대로 사용하면 안 됨. 절대절대로."
+    """
+    pii = _pii()
+    masked = pii.mask_pii("other.user 님이 문의하셨고 ops.user 도 같은 증상입니다.")
+    assert "other.user" not in masked and "ops.user" not in masked, masked
+    assert pii.mask_pii("hong.gildong@corp.example 로 회신") .count("@") == 0
+
+    # 계정이 아닌 것까지 지우면 문장이 깨진다. 파일명·도메인은 그대로 둔다.
+    for keep in ("server.log 를 확인하세요", "docker-compose.dev.yml 을 고칩니다",
+                 "main.py 74번째 줄", "docs.md 참고", "www.google.com 접속"):
+        assert pii.mask_pii(keep) == keep, keep
+
+
+def test_masking_and_answer_guard_share_one_account_rule():
+    """두 곳에 정규식을 따로 두었더니 한쪽만 고쳐졌다 — 노출 차단은 `other.user`을 잡는데
+    마스킹은 놓쳤다. 판정은 `pii` 하나뿐이어야 한다 (#176)."""
+    pii = _pii()
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    assert "from pii import find_accounts" in src, "agent_server가 계정 판정을 또 만들었다"
+    assert "_ACCOUNTISH_RE" not in src, "agent_server에 계정 정규식이 다시 생겼다"
+
+    g = _guard(True, "질문", user_id="ops.user")
+    g.searched_manual = True
+    # 같은 문자열에 대해 두 경로의 판정이 일치해야 한다.
+    for tok, is_acct in (("other.user", True), ("gil.dong", True),
+                         ("server.log", False), ("setup.py", False)):
+        assert pii.is_masked_account(tok) is is_acct, tok
+        blocked = tok not in g.review(f"{tok} 관련 내용입니다. 이 줄은 충분히 길어서 남습니다.")
+        assert blocked is is_acct, f"{tok}: 마스킹과 차단의 판정이 다르다"
+
+
+def test_guard_says_other_account_cannot_be_checked():
+    """남의 계정 얘기만 남으면 "매뉴얼에서 확인되지 않았습니다"는 **틀린 설명**이다.
+    확인이 안 된 게 아니라 확인해 **드릴 수 없는** 것이다 (#176).
+
+    사용자 지시: "다른 사람 계정은 확인 불가하다고 얘기해야 하고, 장애 원인과 해결 방안
+    정도만 몇 가지 유추해서 알려주는 정도는 가능함."
+    """
+    g = _guard(True, "other.user 계정 확인 부탁드립니다", user_id="ops.user")
+    g.searched_manual = True
+    out = g.review("other.user 계정의 접속 상태를 확인한 결과 정상입니다.")
+    assert "확인해 드릴 수 없습니다" in out, out
+    assert "확인되지 않았습니다" not in out, "확인 불가와 미확인을 뒤섞어 말한다"
+    assert "other.user" not in out
+
+
+def test_manual_results_mask_accounts_on_every_path():
+    """매뉴얼에도 남의 계정이 예시로 박혀 있다. 모델은 그것을 **질문한 사람의 계정인 양**
+    옮겼다 (#176). 매뉴얼 본문이 에이전트에게 가는 길이 둘(검색·이어읽기)이라, 한쪽만
+    가리면 다른 쪽으로 샌다."""
+    search = open(os.path.join(ROOT, "shared", "manual_search.py"), encoding="utf-8").read()
+    assert 'item["chunk_text"] = mask_accounts(' in search, "검색 결과가 계정을 안 가린다"
+    doc = open(os.path.join(ROOT, "mcp_servers", "manual_mcp", "server.py"),
+               encoding="utf-8").read()
+    assert "mask_accounts(c.get(\"chunk_text\"))" in doc, "get_document가 계정을 안 가린다"
+
+    # 매뉴얼은 조직명·직급을 남긴다 - 절차의 일부라 지우면 어디에 신청할지 알 수 없다.
+    pii = _pii()
+    out = pii.mask_accounts("신청은 인프라팀에 하고 담당자: 홍길동, 계정 other.user")
+    assert "인프라팀" in out and "홍길동" in out and "other.user" not in out, out
+
+
+# --- #177: 실행해야 답이 나오는 질문에는 **근거를 붙이지 않는다** ------------------------
+def _rag_src():
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    return src[src.index("_ROUTE_PROMPT = "):src.index("async def _summarize_turns")]
+
+
+def test_prefetch_is_skipped_when_the_answer_needs_execution():
+    """`내 홈스토리지 경로 알려줘`에 선검색이 매뉴얼 3건을 물어다 주자, 모델이 거기 적힌
+    경로 규칙으로 답을 만들고 **실행을 건너뛰었다**(그러면서 "myquota 실행 결과를 종합하여"
+    라고 적었다 — 부르지도 않았다) (#177).
+
+    근거가 눈앞에 있으면 모델은 그것으로 답한다. 그러니 그런 질문에는 붙이지 않는다."""
+    body = _rag_src()
+    assert "if await _route_needs_execution(question):" in body, "라우팅을 하지 않는다"
+    i = body.index("await _route_needs_execution(question)")
+    j = body.index("manual_hits, voc_hits = await asyncio.gather")
+    assert i < j, "선검색을 다 하고 나서 라우팅하면 느린 것도 그대로다"
+    assert "return _ROUTED_TO_EXECUTION, [], []" in body, "건너뛸 때 아무 말도 안 한다"
+
+
+def test_routing_defaults_to_search_when_it_cannot_decide():
+    """잘못 `실행`으로 보내면 매뉴얼에 있는 답을 못 쓴다. 잘못 `검색`으로 보내도 도구는
+    그대로 붙어 있어 모델이 실행할 수 있다. **틀렸을 때 가벼운 쪽이 기본값이다** (#177)."""
+    body = _rag_src()
+    assert '확실하지 않으면 `검색`' in body, "애매할 때의 기본값을 정하지 않았다"
+    # 실패·미설정은 전부 선검색(지금까지의 동작)으로 떨어져야 한다.
+    fn = body[body.index("async def _route_needs_execution"):body.index("_ROUTED_TO_EXECUTION = ")]
+    assert fn.count("return False") >= 3, "실패·미설정일 때 실행으로 보내면 안 된다"
+    assert 'hit = text.startswith("실행")' in fn, "응답을 관대하게 해석하면 오분류가 는다"
+
+
+def test_routing_prompt_gives_a_criterion_not_a_list_of_phrasings():
+    """질문 형태를 나열하면 목록에 없는 표현이 올 때 또 뚫린다(#145·#149와 같은 규칙).
+    **판별 기준을 주고 모델이 적용하게 한다** (#177)."""
+    body = _rag_src()
+    prompt = body[body.index("_ROUTE_PROMPT = "):body.index("async def _route_needs_execution")]
+    assert "판단 기준" in prompt
+    for phrasing in ("보여줘", "알려줘", "어디야", "얼마야", "몇 개야"):
+        assert phrasing not in prompt, f"질문 형태를 나열하고 있다: {phrasing}"
+
+
+def test_skipped_prefetch_is_not_reported_as_zero_hits():
+    """"매뉴얼 0건 찾음"은 **찾아봤는데 없었다**는 뜻이다. 건너뛴 것을 그렇게 말하면
+    사용자도 모델도 오해한다 (#177)."""
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    body = src[src.index("async def chat_completions("):src.index("def _mem_on(")]
+    assert 'prepared["routed"] = rag_block == _ROUTED_TO_EXECUTION' in body
+    assert 'if show_tools and not prepared["routed"]:' in body, \
+        "건너뛰었는데도 '몇 건 찾음'을 내보낸다"
+
+
+def test_routing_switch_is_visible_in_the_console():
+    """설정 키를 만들고 db-init까지 돌려도 콘솔 허용 목록에 없으면 화면에 안 나온다(#161)."""
+    assert '"prefetch_route"' in open(
+        os.path.join(ROOT, "shared", "migrations.py"), encoding="utf-8").read()
+    html = open(os.path.join(ROOT, "admin_console", "frontend", "index.html"),
+                encoding="utf-8").read()
+    groups = html[html.index("const SETTING_GROUPS"):html.index("const SETTING_GROUPS") + 3000]
+    assert '"prefetch_route"' in groups, "설정 탭에 안 보인다"
+
+
+def test_instruction_says_standard_commands_are_not_registered():
+    """사용자: "execution_mcp 에는 일반적인 기본 linux command는 등록 안해둘거야.
+    이것도 자유롭게 실행할 수 있어야해" (#177).
+
+    커맨드 이름은 적지 않는다(#145) — **등록 목록에 없다고 못 하는 게 아니다**만 말한다."""
+    instr = _instruction_text()
+    assert "표준 리눅스 명령은 등록돼 있지" in instr
+    assert "도구 목록에 없다고 해서 못 하는 것이 아닙니다" in instr
+
+
+def test_instruction_explains_the_missing_evidence_block():
+    """근거가 없는 것과 **붙이지 않은 것**은 다르다. 구분해 주지 않으면 모델은
+    "검색해도 없었다"로 오해하고 지어낸다 (#177)."""
+    instr = _instruction_text()
+    assert "# 이번 질문에 대한 판단" in instr
+    assert "실행해서 확인할 질문" in instr
+
+
+def test_instruction_refuses_other_peoples_accounts_with_causes():
+    """확인 불가만 말하고 끝내면 사용자는 아무것도 못 한다. 원인·해 볼 것은 안내한다 (#176)."""
+    instr = _instruction_text()
+    assert "남의 계정을 답변에 옮겨 적지 않습니다" in instr
+    assert "확인해 드릴 수 없다고 먼저 밝히고" in instr
+    assert "가능한 원인과 해 볼 것" in instr
 
 
 def test_public_tree_never_ships_an_empty_vendor_dir():
