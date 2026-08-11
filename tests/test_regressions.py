@@ -1365,6 +1365,13 @@ def test_rsync_never_deletes_server_only_files():
     active = "\n".join(ln for ln in script.split("\n") if not ln.lstrip().startswith("#"))
     for pattern in ("--exclude '.env'", "--exclude 'secrets/'"):
         assert pattern in active, f"deploy-rsync.sh에 {pattern}가 없다 - --delete가 지운다"
+
+        # **저장소가 안 들고 다니는데 서버에는 있어야 하는 것**이 --delete의 1순위 표적이다.
+        # `.gitignore`에 있다는 것은 "저장소가 안 들고 다닌다"는 뜻이지 "없어도 된다"는
+        # 뜻이 아니다. vendor의 React·Babel이 지워지면 관리자 콘솔이 통째로 빈 화면이 된다.
+        for pattern in ("admin_console/frontend/vendor/", "Temp/"):
+            assert pattern in active, \
+                f"deploy-rsync.sh에 {pattern}가 없다 - 서버에만 있는 파일을 --delete가 지운다"
     # 지워질 파일을 **먼저 보여주고 확인을 받는** 것이 이 스크립트의 존재 이유다.
     assert "del." in script and "계속할까요" in script, \
         "deploy-rsync.sh가 삭제 목록을 보여주고 확인받지 않는다"
