@@ -1,0 +1,1690 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Agent Platform · 운영 콘솔</title>
+<!-- 폐쇄망: /vendor 로컬 파일 사용. dev(인터넷 가능): 파일이 없으면 CDN으로 폴백. -->
+<script>
+  function loadScript(localSrc, cdnSrc, cb) {
+    var s = document.createElement("script");
+    s.src = localSrc;
+    s.onload = cb;
+    s.onerror = function () {
+      var f = document.createElement("script");
+      f.src = cdnSrc; f.onload = cb; document.head.appendChild(f);
+    };
+    document.head.appendChild(s);
+  }
+</script>
+<script>
+  loadScript("/vendor/react.production.min.js", "https://unpkg.com/react@18/umd/react.production.min.js", function () {
+    loadScript("/vendor/react-dom.production.min.js", "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js", function () {
+      loadScript("/vendor/babel.min.js", "https://unpkg.com/@babel/standalone/babel.min.js", function () {
+        window.__depsReady && window.__depsReady();
+      });
+    });
+  });
+</script>
+<style>
+  :root {
+    --bg: #12151a;
+    --panel: #1a1e25;
+    --panel-2: #20242c;
+    --border: #262b33;
+    --text: #d7dce2;
+    --muted: #7b8492;
+    --accent: #3ea88f;   /* published / enabled / success */
+    --warn: #d3a54a;     /* draft */
+    --danger: #cc6558;   /* archived / disabled / error */
+    --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
+    --sans: -apple-system, "Segoe UI", "Pretendard", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; }
+  #root { display: flex; min-height: 100vh; }
+
+  .sidebar { width: 220px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--border); padding: 20px 0; }
+  .sidebar h1 { font-size: 14px; letter-spacing: 0.02em; color: var(--muted); padding: 0 20px 16px; margin: 0; text-transform: uppercase; }
+  .nav-item { padding: 10px 20px; cursor: pointer; color: var(--muted); border-left: 2px solid transparent; font-size: 13.5px; }
+  .nav-item:hover { color: var(--text); }
+  .nav-item.active { color: var(--text); border-left-color: var(--accent); background: var(--panel-2); }
+
+  .main { flex: 1; padding: 28px 36px; max-width: 1180px; }
+  .main h2 { font-size: 18px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:hover td { background: var(--panel-2); }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-family: var(--mono); border-left: 3px solid; }
+  .badge.published, .badge.true, .badge.enabled, .badge.success { border-color: var(--accent); color: var(--accent); background: rgba(62,168,143,0.1); }
+  .badge.draft { border-color: var(--warn); color: var(--warn); background: rgba(211,165,74,0.1); }
+  .badge.archived, .badge.false, .badge.disabled, .badge.error, .badge.blocked { border-color: var(--danger); color: var(--danger); background: rgba(204,101,88,0.1); }
+
+  button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0d1310; font-weight: 600; }
+  button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
+  input, textarea, select { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 6px 8px; font-size: 13px; font-family: var(--sans); }
+  textarea { width: 100%; font-family: var(--mono); font-size: 12.5px; }
+
+  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+  .chunk { border: 1px solid var(--border); border-radius: 5px; padding: 10px; margin-bottom: 8px; background: var(--panel-2); }
+  .chunk .meta { color: var(--muted); font-size: 11px; font-family: var(--mono); margin-bottom: 6px; display: flex; justify-content: space-between; }
+  .row-actions { display: flex; gap: 6px; }
+  .empty { color: var(--muted); padding: 30px 0; text-align: center; font-size: 13px; }
+  .switch { position: relative; width: 36px; height: 20px; display: inline-block; }
+  .switch input { display: none; }
+  .switch .track { position: absolute; inset: 0; background: var(--danger); border-radius: 10px; cursor: pointer; transition: 0.15s; }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch .thumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; background: #0d1310; border-radius: 50%; transition: 0.15s; }
+  .switch input:checked ~ .thumb { transform: translateX(16px); }
+  pre.result { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 11.5px; max-width: 320px; overflow: auto; white-space: pre-wrap; font-family: var(--mono); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback } = React;
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    // /api/ 경로에 405가 오면 **그 라우트가 지금 떠 있는 서버에 없다**는 뜻이다.
+    // FastAPI는 모르는 경로를 맨 끝 StaticFiles 마운트로 넘기는데, 그건 GET/HEAD만 받는다.
+    // 화면(정적 파일)은 rsync로 곧바로 새 코드가 되는데 백엔드는 재시작해야 바뀌므로,
+    // "새 버튼을 눌렀더니 405"가 반복됐다(#27, #30, #138). 원인을 그대로 알려준다.
+    if (res.status === 405 && path.startsWith("/api/")) {
+      throw new Error(
+        "관리자 콘솔 백엔드가 예전 코드로 떠 있어 이 기능이 아직 없습니다.\n" +
+        "화면은 새 코드인데 서버가 안 바뀐 상태입니다. 서버에서 재시작하세요:\n\n" +
+        "  docker compose -f docker-compose.dev.yml restart admin-console");
+    }
+    throw new Error(`${res.status}: ${text}`);
+  }
+  const ct = res.headers.get("content-type") || "";
+  return ct.includes("application/json") ? res.json() : null;
+}
+
+function Badge({ value }) {
+  const label = typeof value === "boolean" ? (value ? "enabled" : "disabled") : value;
+  return <span className={`badge ${String(value)}`}>{label}</span>;
+}
+
+// ---------------------------------------------------------------- Manuals
+function ManualsPanel() {
+  const [manuals, setManuals] = useState([]);
+  const [detail, setDetail] = useState(null);
+  const [versions, setVersions] = useState([]);
+  const [title, setTitle] = useState("");
+  const [file, setFile] = useState(null); // 브라우저 File 또는 {name, serverPath} (서버 파일 선택)
+  const [showBrowser, setShowBrowser] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  // 정제 옵션 (업로드 시 공통 적용)
+  const [opts, setOpts] = useState({ strip_html: true, collapse_space: true, drop_urls: false, include_speaker_notes: false });
+
+  // 문서(docx/pptx/pdf/txt/md) 미리보기 결과
+  const [docPreview, setDocPreview] = useState(null); // {upload_id, ext, total_chunks, preview_chunks}
+  // 엑셀 미리보기 결과 + 컬럼 선택 상태
+  const [excelPreview, setExcelPreview] = useState(null); // {upload_id, columns, sample_rows, total_rows}
+  const [contentCols, setContentCols] = useState([]);
+  const [docCol, setDocCol] = useState("");   // 행마다의 원본 문서 이름(ppt_title 등)
+
+  const [embStatus, setEmbStatus] = useState(null);
+  const [reembedBusy, setReembedBusy] = useState(false);
+
+  const [refPath, setRefPath] = useState("");
+  const load = useCallback(async () => setManuals(await api("/api/manuals")), []);
+  const loadEmbStatus = useCallback(async () => {
+    try { setEmbStatus(await api("/api/manuals/embedding-status")); } catch (e) { setEmbStatus(null); }
+  }, []);
+  useEffect(() => { load(); loadEmbStatus(); }, [load, loadEmbStatus]);
+
+  // 현재 임베딩 설정과 어긋난 청크를 반복 호출로 전부 다시 임베딩한다.
+  const [testQuery, setTestQuery] = useState("");
+  const [testResult, setTestResult] = useState(null);
+  const [testBusy, setTestBusy] = useState(false);
+
+  const runSearchTest = async () => {
+    if (!testQuery.trim()) return;
+    setTestBusy(true);
+    try {
+      setTestResult(await api("/api/manuals/search-test", {
+        method: "POST", body: JSON.stringify({ query: testQuery, top_k: 10 }),
+      }));
+    } catch (e) { alert("검색 테스트 실패: " + e.message); }
+    setTestBusy(false);
+  };
+
+  const reembed = async () => {
+    if (!confirm("현재 임베딩 설정으로 다시 임베딩할까요? 청크 수에 따라 시간이 걸립니다.")) return;
+    setReembedBusy(true);
+    try {
+      let total = 0, failed = 0;
+      for (let i = 0; i < 200; i++) {
+        const r = await api("/api/manuals/reembed", { method: "POST" });
+        total += r.processed;
+        failed += (r.embed_failed || 0);
+        // processed가 0인데 남은 게 있으면 전부 임베딩 실패한 것 — 무한 루프를 막는다.
+        if (r.remaining === 0 || (r.processed === 0 && !r.embed_failed)) break;
+        if (r.processed === 0 && r.embed_failed) break;
+      }
+      await loadEmbStatus();
+      alert(`재임베딩 완료 · ${total}개 처리`
+        + (failed ? `\n임베딩 실패 ${failed}개(내용은 남아 있고 키워드 검색에는 잡힙니다).` : ""));
+    } catch (e) { alert("재임베딩 실패: " + e.message); }
+    setReembedBusy(false);
+  };
+
+  const openDetail = async (id) => {
+    const d = await api(`/api/manuals/${id}`);
+    setDetail(d);
+    setRefPath(d.file.reference_path || "");
+    setVersions(await api(`/api/manuals/${id}/versions`));
+  };
+
+  const extOf = (f) => (f ? f.name.slice(f.name.lastIndexOf(".")).toLowerCase() : "");
+  const isExcel = (f) => [".xlsx", ".xls", ".csv", ".tsv"].includes(extOf(f));
+  const fileKind = (f) => {
+    const e = extOf(f);
+    if ([".xlsx", ".xls"].includes(e)) return "엑셀 (열 선택)";
+    if (e === ".csv") return "CSV (열 선택)";
+    if (e === ".tsv") return "TSV·탭 구분 (열 선택)";
+    if (e === ".pptx") return "PPT";
+    if ([".docx", ".pdf"].includes(e)) return "문서 (섹션 단위)";
+    if ([".txt", ".md"].includes(e)) return "텍스트 (문단 단위)";
+    return "";
+  };
+
+  const resetPreviews = () => { setDocPreview(null); setExcelPreview(null); setContentCols([]); setDocCol(""); };
+
+  const appendFile = (fd, f) => { if (f.serverPath) fd.append("server_path", f.serverPath); else fd.append("file", f); };
+
+  // 파일을 고르면(로컬/서버 공통) 제목이 비어있을 때만 파일명(확장자 제외)으로 자동 채운다.
+  const pickFile = (f) => {
+    setFile(f);
+    if (f && !title) setTitle(f.name.replace(/\.[^.]+$/, ""));
+    resetPreviews();
+  };
+
+  const analyze = async () => {
+    if (!file) return alert("파일을 먼저 선택하세요.");
+    if (!title) return alert("제목을 입력하세요.");
+    setBusy(true);
+    resetPreviews();
+    try {
+      if (isExcel(file)) {
+        const fd = new FormData();
+        appendFile(fd, file);
+        fd.append("strip_html", opts.strip_html);
+        fd.append("collapse_space", opts.collapse_space);
+        fd.append("drop_urls", opts.drop_urls);
+        const r = await fetch("/api/manuals/excel/preview", { method: "POST", body: fd });
+        if (!r.ok) throw new Error(await r.text());
+        const prev = await r.json();
+        setExcelPreview(prev);
+        // 사내 추출 포맷은 원본 PPT 이름을 ppt_title 열에 담는다 - 있으면 자동으로 잡아 준다.
+        const auto = (prev.columns || []).find(c => /^(ppt_?title|문서명|자료명|document_?title)$/i.test(String(c).trim()));
+        if (auto) setDocCol(auto);
+      } else {
+        const fd = new FormData();
+        appendFile(fd, file);
+        fd.append("strip_html", opts.strip_html);
+        fd.append("collapse_space", opts.collapse_space);
+        fd.append("drop_urls", opts.drop_urls);
+        fd.append("include_speaker_notes", opts.include_speaker_notes);
+        const r = await fetch("/api/manuals/preview", { method: "POST", body: fd });
+        if (!r.ok) throw new Error(await r.text());
+        setDocPreview(await r.json());
+      }
+    } catch (e) { alert("전처리 실패: " + e.message); }
+    setBusy(false);
+  };
+
+  const commitDoc = async () => {
+    setBusy(true);
+    try {
+      await api("/api/manuals/commit", {
+        method: "POST",
+        body: JSON.stringify({ upload_id: docPreview.upload_id, title }),
+      });
+      resetPreviews(); setTitle(""); setFile(null);
+      await load();
+      alert("등록 완료. 목록에서 청크를 확인·교정한 뒤 발행하세요.");
+    } catch (e) { alert("등록 실패: " + e.message); }
+    setBusy(false);
+  };
+
+  const commitExcel = async () => {
+    if (contentCols.length === 0) return alert("내용으로 쓸 열을 1개 이상 선택하세요.");
+    setBusy(true);
+    try {
+      await api("/api/manuals/excel/commit", {
+        method: "POST",
+        body: JSON.stringify({
+          upload_id: excelPreview.upload_id, title,
+          content_columns: contentCols,
+          doc_title_column: docCol || null,
+        }),
+      });
+      resetPreviews(); setTitle(""); setFile(null);
+      await load();
+      alert("등록 완료. 목록에서 확인 후 발행하세요.");
+    } catch (e) { alert("등록 실패: " + e.message); }
+    setBusy(false);
+  };
+
+  const toggleContentCol = (c) =>
+    setContentCols((p) => (p.includes(c) ? p.filter((x) => x !== c) : [...p, c]));
+
+  const saveChunk = async (chunkId, text) => {
+    const fd = new FormData();
+    fd.append("chunk_text", text);
+    await fetch(`/api/manuals/chunks/${chunkId}`, { method: "PATCH", body: fd });
+  };
+  const deleteChunk = async (chunkId) => {
+    await api(`/api/manuals/chunks/${chunkId}`, { method: "DELETE" });
+    openDetail(detail.file.id);
+  };
+  const saveRefPath = async () => {
+    if (!detail) return;
+    await api(`/api/manuals/${detail.file.id}/reference-path`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reference_path: refPath }),
+    });
+    await load();
+    alert("문서 위치를 저장했습니다.");
+  };
+  // 큰 문서는 청크가 수천 개라 발행에 시간이 걸린다. 진행 표시가 없으면 "버튼이 안 눌린다"로
+  // 보이므로, 누르는 즉시 상태를 바꾸고 끝나면 결과(임베딩 실패 수 포함)를 알린다.
+  const [publishBusy, setPublishBusy] = useState(false);
+  const publish = async (id) => {
+    setPublishBusy(true);
+    try {
+      const r = await api(`/api/manuals/${id}/publish`, { method: "POST" });
+      await load(); await openDetail(id); await loadEmbStatus();
+      alert(`발행 완료 · 임베딩 ${r.embedded_chunks}개`
+        + (r.embed_failed ? `\n임베딩 실패 ${r.embed_failed}개(내용은 남아 있고 키워드 검색에는 잡힙니다). `
+                            + `"현재 설정으로 다시 임베딩"으로 채울 수 있습니다.` : ""));
+    } catch (e) { alert("발행 실패: " + e.message); }
+    setPublishBusy(false);
+  };
+  const unpublish = async (id) => {
+    if (!confirm("발행을 취소하면 즉시 검색·조회에서 제외됩니다. 계속할까요?")) return;
+    try { await api(`/api/manuals/${id}/unpublish`, { method: "POST" }); await load(); openDetail(id); }
+    catch (e) { alert(e.message); }
+  };
+  const remove = async (id) => {
+    if (!confirm("이 버전을 삭제할까요?")) return;
+    try { await api(`/api/manuals/${id}`, { method: "DELETE" }); setDetail(null); await load(); }
+    catch (e) { alert(e.message); }
+  };
+
+  const OptToggles = () => (
+    <div style={{display: "flex", gap: 16, fontSize: 12.5, color: "var(--muted)", flexWrap: "wrap"}}>
+      <label><input type="checkbox" checked={opts.strip_html} onChange={e => setOpts({...opts, strip_html: e.target.checked})} /> HTML 태그·엔티티 제거</label>
+      <label><input type="checkbox" checked={opts.collapse_space} onChange={e => setOpts({...opts, collapse_space: e.target.checked})} /> 공백·빈 줄 정리</label>
+      <label><input type="checkbox" checked={opts.drop_urls} onChange={e => setOpts({...opts, drop_urls: e.target.checked})} /> URL 제거</label>
+      <label><input type="checkbox" checked={opts.include_speaker_notes} onChange={e => setOpts({...opts, include_speaker_notes: e.target.checked})} /> PPT 발표자 노트 포함</label>
+    </div>
+  );
+
+  return (
+    <div>
+      <h2>매뉴얼 관리</h2>
+      {embStatus && embStatus.stale_chunks > 0 && (
+        <div className="card" style={{borderColor: "var(--warn)"}}>
+          <div style={{color: "var(--warn)", fontSize: 13, marginBottom: 8}}>
+            <strong>의미 검색이 안 되는 청크 {embStatus.stale_chunks}개</strong>
+          </div>
+          <div style={{fontSize: 11.5, color: "var(--muted)", marginBottom: 8, fontFamily: "var(--mono)"}}>
+            {embStatus.by_model.map((m, i) => (
+              <span key={i}>{m.embed_model || "(없음)"}/{m.embed_dim || "-"}: {m.count}개{" "}</span>
+            ))}
+          </div>
+          <button className="primary" disabled={reembedBusy} onClick={reembed}>
+            {reembedBusy ? "재임베딩 중…" : "현재 설정으로 다시 임베딩"}
+          </button>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="toolbar">
+          <input placeholder="문서 제목" value={title} onChange={e => setTitle(e.target.value)} style={{width: 260}} />
+          <input type="file" accept=".xlsx,.xls,.csv,.tsv,.docx,.pptx,.pdf,.txt,.md"
+                 onChange={e => pickFile(e.target.files[0])} />
+          <button onClick={() => setShowBrowser(true)}>서버 파일에서 선택</button>
+          {file && <span className="badge" style={{borderColor: "var(--muted)", color: "var(--muted)"}}>
+            {file.serverPath ? `서버: ${file.name}` : fileKind(file)}
+          </span>}
+          <button className="primary" disabled={busy} onClick={analyze}>{busy ? "처리 중..." : "전처리 미리보기"}</button>
+        </div>
+        <div style={{marginTop: 10}}><OptToggles /></div>
+      </div>
+
+      <div className="card">
+        <div className="toolbar" style={{marginBottom: 6}}>
+          <strong style={{fontSize: 13}}>검색 테스트</strong>
+          <input placeholder="예: gpu 노드 접근하려면" value={testQuery}
+                 onChange={e => setTestQuery(e.target.value)}
+                 onKeyDown={e => e.key === "Enter" && runSearchTest()} style={{width: 320}} />
+          <button disabled={testBusy} onClick={runSearchTest}>{testBusy ? "검색 중…" : "검색"}</button>
+        </div>
+        {testResult && (
+          <div style={{fontSize: 12.5}}>
+            <div style={{marginBottom: 8, fontFamily: "var(--mono)", fontSize: 11.5}}>
+              <div>검색 방식: <strong>{testResult.mode}</strong> · 발행 청크 {testResult.published_chunks}개
+                (임베딩 있는 것 {testResult.chunks_with_embedding}개)</div>
+              <div style={{color: testResult.embedding.ok ? "var(--accent)" : "var(--danger)"}}>
+                임베딩: {testResult.embedding.ok ? `정상 (${testResult.embedding.dim}차원)` : `실패 — ${testResult.embedding.error}`}
+              </div>
+              <div style={{color: testResult.rerank.used ? "var(--accent)" : "var(--danger)"}}>
+                리랭커: {testResult.rerank.used
+                  ? `정상 (${testResult.rerank.provider})`
+                  : `미적용 — ${testResult.rerank.reason}`}
+                {testResult.rerank.hint && <span> · {testResult.rerank.hint}</span>}
+              </div>
+              <div>관련도 하한: {testResult.min_score} (이 점수 미만은 에이전트에 전달되지 않음 —
+                설정 <code>rerank_min_score</code>)</div>
+            </div>
+            <table>
+              <thead><tr><th>#</th><th>문서</th><th>섹션</th><th>내용</th><th>점수</th></tr></thead>
+              <tbody>
+                {testResult.hits.map((h, i) => (
+                  <tr key={h.id}>
+                    <td>{i + 1}</td>
+                    <td style={{fontSize: 12}}>{h.title}</td>
+                    <td style={{fontSize: 12, color: "var(--muted)"}}>{h.section_title || "-"}</td>
+                    <td style={{fontSize: 11.5}}>{h.chunk_text}</td>
+                    <td style={{fontFamily: "var(--mono)", fontSize: 11}}>
+                      {h.score != null ? h.score.toFixed(4) : "-"}
+                      {h.vrank != null && <span style={{color: "var(--muted)"}}> v{h.vrank}</span>}
+                      {h.krank != null && <span style={{color: "var(--muted)"}}> k{h.krank}</span>}
+                    </td>
+                  </tr>
+                ))}
+                {testResult.hits.length === 0 && <tr><td colSpan="5" className="empty">검색 결과 없음</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {showBrowser && (
+        <ServerFileBrowser
+          onClose={() => setShowBrowser(false)}
+          onPick={(path, name) => { pickFile({ name, serverPath: path }); setShowBrowser(false); }}
+        />
+      )}
+
+      {/* 문서 미리보기 */}
+      {docPreview && (
+        <div className="card">
+          <div className="toolbar" style={{justifyContent: "space-between"}}>
+            <div><strong>미리보기</strong> · {docPreview.filename} · 총 {docPreview.total_chunks}개 청크
+              {docPreview.total_chunks > docPreview.preview_chunks.length && ` (아래는 앞 ${docPreview.preview_chunks.length}개)`}</div>
+            <div className="row-actions">
+              <button className="primary" disabled={busy} onClick={commitDoc}>이대로 등록</button>
+              <button onClick={() => { setDocPreview(null); analyze(); }}>정제 옵션 다시 적용</button>
+              <button onClick={resetPreviews}>취소</button>
+            </div>
+          </div>
+          <div>
+            {docPreview.preview_chunks.map(c => (
+              <div className="chunk" key={c.seq}>
+                <div className="meta"><span>{c.section_title || "(제목 없음)"} {c.page_no ? `· p${c.page_no}` : ""} · #{c.seq} · {c.char_count}자</span></div>
+                <div style={{whiteSpace: "pre-wrap", fontSize: 12.5}}>{c.chunk_text}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 엑셀 열 선택 */}
+      {excelPreview && (
+        <div className="card">
+          <div style={{marginBottom: 8}}><strong>열 선택</strong> · {excelPreview.filename} · {excelPreview.sheet} · {excelPreview.total_rows}행 · 헤더 {excelPreview.header_row}행</div>
+          <table style={{marginBottom: 12}}>
+            <thead><tr><th>① 내용</th><th>② 문서명</th><th>열 이름</th><th>샘플 값</th></tr></thead>
+            <tbody>
+              {excelPreview.columns.map((col, i) => (
+                <tr key={col + i}>
+                  <td><input type="checkbox" checked={contentCols.includes(col)} onChange={() => toggleContentCol(col)} /></td>
+                  <td><input type="radio" name="dc" checked={docCol === col} onChange={() => setDocCol(col)} /></td>
+                  <td style={{fontFamily: "var(--mono)"}}>{col}</td>
+                  <td style={{color: "var(--muted)", fontSize: 12}}>{excelPreview.sample_rows.map(r => r[i]).filter(v => v).slice(0, 3).join(" · ")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {contentCols.length > 0 && excelPreview.sample_rows[0] && (
+            <div style={{marginBottom: 12, padding: 10, border: "1px dashed var(--muted)", borderRadius: 6}}>
+              <div style={{fontSize: 12.5, color: "var(--muted)", marginBottom: 6}}>
+                미리보기
+              </div>
+              <div style={{fontSize: 12, color: "var(--muted)", marginBottom: 4}}>
+                문서명: {docCol ? (excelPreview.sample_rows[0][excelPreview.columns.indexOf(docCol)] || "(비어있음)") : "(없음)"}
+              </div>
+              <pre style={{whiteSpace: "pre-wrap", fontSize: 12.5, margin: 0}}>
+                {contentCols.map(c => `${c}: ${excelPreview.sample_rows[0][excelPreview.columns.indexOf(c)] || ""}`).join("\n")}
+              </pre>
+            </div>
+          )}
+          <div className="row-actions">
+            <button className="primary" disabled={busy || contentCols.length === 0} onClick={commitExcel}>선택한 열로 등록</button>
+            {docCol && <button onClick={() => setDocCol("")}>문서명 열 해제</button>}
+            <button onClick={resetPreviews}>취소</button>
+          </div>
+        </div>
+      )}
+
+      <table>
+        <thead><tr><th>제목</th><th>버전</th><th>상태</th><th>유형</th><th>파일명</th><th>업로드</th></tr></thead>
+        <tbody>
+          {manuals.map(m => (
+            <tr key={m.id} onClick={() => openDetail(m.id)} style={{cursor: "pointer"}}>
+              <td>{m.title}</td>
+              <td>v{m.version}</td>
+              <td><Badge value={m.status} /></td>
+              <td style={{fontSize: 12, color: "var(--muted)"}}>{m.source_type === "spreadsheet" ? "엑셀" : "문서"}</td>
+              <td>{m.filename}</td>
+              <td style={{fontSize: 12}}>{m.uploaded_by} · {new Date(m.uploaded_at).toLocaleDateString()}</td>
+            </tr>
+          ))}
+          {manuals.length === 0 && <tr><td colSpan="6" className="empty">등록된 매뉴얼이 없습니다.</td></tr>}
+        </tbody>
+      </table>
+
+      {detail && (
+        <div className="card" style={{marginTop: 20}}>
+          <div className="toolbar" style={{justifyContent: "space-between"}}>
+            <div><strong>{detail.file.title}</strong> · v{detail.file.version} <Badge value={detail.file.status} /></div>
+            <div className="row-actions">
+              {detail.file.status !== "published" && (
+                <button className="primary" disabled={publishBusy} onClick={() => publish(detail.file.id)}>
+                  {publishBusy ? "발행 중…" : "발행"}
+                </button>
+              )}
+              {detail.file.status === "published" && <button className="danger" onClick={() => unpublish(detail.file.id)}>발행취소</button>}
+              {detail.file.status !== "published" && <button className="danger" onClick={() => remove(detail.file.id)}>삭제</button>}
+              <button onClick={() => setDetail(null)}>닫기</button>
+            </div>
+          </div>
+          <div style={{margin: "10px 0"}}>
+            <label style={{fontSize: 12.5, color: "var(--muted)"}}>
+              문서 위치
+            </label>
+            <div className="toolbar" style={{marginTop: 6}}>
+              <input style={{flex: 1}} value={refPath}
+                     onChange={e => setRefPath(e.target.value)}
+                     placeholder="예: 슈퍼컴 Portal (https://…) > USEFUL INFO. > 활용 가이드 > GPU 서버 활용 가이드" />
+              <button onClick={saveRefPath} disabled={busy}>경로 저장</button>
+            </div>
+          </div>
+          {versions.length > 1 && (
+            <div style={{margin: "10px 0", fontSize: 12.5}}>
+              버전 이력: {versions.map(v => (
+                <span key={v.id} style={{marginRight: 10}}>
+                  v{v.version} <Badge value={v.status} />
+                  {v.status === "archived" && <button style={{marginLeft: 4}} onClick={() => publish(v.id)}>롤백</button>}
+                </span>
+              ))}
+            </div>
+          )}
+          <div style={{marginTop: 12}}>
+            {detail.file.status !== "draft" && (
+              <div className="subtitle" style={{color: "var(--warn)"}}>
+                읽기 전용입니다.
+              </div>
+            )}
+            {detail.chunks.map(c => (
+              <div className="chunk" key={c.id}>
+                <div className="meta">
+                  <span>{c.section_title || "(제목 없음)"} {c.page_no ? `· p${c.page_no}` : ""} · #{c.seq} {c.embedded ? "· 임베딩됨" : "· 미임베딩"}</span>
+                  {detail.file.status === "draft" && <button className="danger" onClick={() => deleteChunk(c.id)}>삭제</button>}
+                </div>
+                <textarea defaultValue={c.chunk_text}
+                  readOnly={detail.file.status !== "draft"}
+                  style={detail.file.status !== "draft" ? {opacity: 0.65, cursor: "not-allowed"} : {}}
+                  rows={Math.min(10, Math.max(2, Math.ceil(c.chunk_text.length / 90)))}
+                  onBlur={e => { if (detail.file.status === "draft" && e.target.value !== c.chunk_text) saveChunk(c.id, e.target.value); }} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------- VOC
+// 처리 주체 라벨(#157). `unknown`은 "판정보류" — 에이전트는 이것을 운영자 건과 같이 다룬다.
+const HANDLED_LABEL = { user: "사용자", operator: "운영자", unknown: "판정보류" };
+
+function VocPanel() {
+  const [items, setItems] = useState([]);
+  const [q, setQ] = useState("");
+  const [form, setForm] = useState({ question: "", answer: "" });
+  const [editingId, setEditingId] = useState(null);
+  const [showBrowser, setShowBrowser] = useState(false);
+
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [batches, setBatches] = useState([]);
+  const [unbatched, setUnbatched] = useState(0);
+  const [batchId, setBatchId] = useState("");     // "" = 전체
+  const [selected, setSelected] = useState([]);   // 체크한 행 id들
+  const [cls, setCls] = useState(null);           // 처리 주체 분류 현황(#157)
+  const PAGE = 100;
+
+  const load = useCallback(async () => {
+    const p = new URLSearchParams({ offset: String(offset), limit: String(PAGE) });
+    if (q) p.set("q", q);
+    if (batchId) p.set("batch_id", batchId);
+    const data = await api(`/api/voc?${p}`);
+    setItems(data.items);
+    setTotal(data.total);
+    setSelected([]);
+  }, [q, offset, batchId]);
+  const loadBatches = useCallback(async () => {
+    const data = await api("/api/voc/batches");
+    setBatches(data.batches); setUnbatched(data.unbatched);
+  }, []);
+  const loadClassify = useCallback(async () => {
+    try { setCls(await api("/api/voc/classify/status")); } catch { /* 구버전 서버 */ }
+  }, []);
+  const runClassify = async (limit) => {
+    try {
+      await api(`/api/voc/classify?limit=${limit}`, { method: "POST" });
+      loadClassify();
+    } catch (e) { alert("분류 시작 실패: " + e.message); }
+  };
+  // 이미 LLM에 나가 있는 배치는 끝내고 저장한 뒤 멈춘다 — 그래서 몇 초 걸릴 수 있다.
+  const stopClassify = async () => {
+    try {
+      await api("/api/voc/classify/stop", { method: "POST" });
+      loadClassify();
+    } catch (e) { alert("중지 실패: " + e.message); }
+  };
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadBatches(); }, [loadBatches]);
+  useEffect(() => { loadClassify(); }, [loadClassify]);
+  // 분류가 도는 동안만 2초마다 진행 상황을 갱신하고, 끝나면 목록도 다시 읽는다.
+  useEffect(() => {
+    if (!cls?.progress?.running) return;
+    const t = setInterval(async () => {
+      const next = await api("/api/voc/classify/status").catch(() => null);
+      if (!next) return;
+      setCls(next);
+      if (!next.progress?.running) load();
+    }, 2000);
+    return () => clearInterval(t);
+  }, [cls?.progress?.running, load]);
+  // 검색어·묶음을 바꾸면 첫 페이지로 되돌린다(빈 페이지가 뜨는 걸 막는다).
+  useEffect(() => { setOffset(0); }, [q, batchId]);
+
+  const allChecked = items.length > 0 && selected.length === items.length;
+  const toggleAll = () => setSelected(allChecked ? [] : items.map(v => v.id));
+  const toggleOne = (id) => setSelected(
+    selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]);
+
+  const deleteSelected = async () => {
+    if (selected.length === 0) return;
+    if (!confirm(`선택한 ${selected.length}건을 삭제할까요? 되돌릴 수 없습니다.`)) return;
+    const r = await api("/api/voc/bulk-delete", {
+      method: "POST", body: JSON.stringify({ ids: selected }) });
+    await load(); await loadBatches();
+    alert(`${r.deleted}건 삭제했습니다.`);
+  };
+
+  const deleteBatch = async (b) => {
+    if (!confirm(`"${b.source_file || b.batch_id}" 업로드 ${b.record_count}건을 통째로 삭제할까요?`)) return;
+    const r = await api(`/api/voc/batches/${b.batch_id}`, { method: "DELETE" });
+    if (batchId === b.batch_id) setBatchId("");
+    await load(); await loadBatches();
+    alert(`${r.deleted}건 삭제했습니다.`);
+  };
+
+  const submit = async () => {
+    if (!form.question || !form.answer) return alert("질문/답변을 입력하세요.");
+    if (editingId) {
+      await api(`/api/voc/${editingId}`, { method: "PATCH", body: JSON.stringify(form) });
+    } else {
+      await api("/api/voc", { method: "POST", body: JSON.stringify(form) });
+    }
+    setForm({ question: "", answer: "" });
+    setEditingId(null);
+    load();
+  };
+
+  const edit = (row) => { setForm({ question: row.question, answer: row.answer }); setEditingId(row.id); };
+  const remove = async (id) => { if (confirm("삭제할까요?")) { await api(`/api/voc/${id}`, { method: "DELETE" }); load(); } };
+
+  // 엑셀/CSV: 헤더 행을 자동으로 찾고 열을 골라 등록한다(형식 고정 없음).
+  const [tbl, setTbl] = useState(null);   // {upload_id, columns, sample_rows, header_row, ...}
+  const [map, setMap] = useState({ question_column: "", answer_column: "", require_columns: [] });
+  const [busy, setBusy] = useState(false);
+  const [lastFile, setLastFile] = useState(null);
+
+  const importFile = async (f, headerRow) => {
+    if (!f) return;
+    setBusy(true); setTbl(null); setLastFile(f);
+    try {
+      const fd = new FormData();
+      if (f.serverPath) fd.append("server_path", f.serverPath); else fd.append("file", f);
+      if (headerRow) fd.append("header_row", String(headerRow));
+      const r = await fetch("/api/voc/excel/preview", { method: "POST", body: fd });
+      if (!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      setTbl(data);
+      setMap({
+        question_column: data.suggest.question_column,
+        answer_column: data.suggest.answer_column,
+        require_columns: [],
+      });
+    } catch (e) { alert("전처리 실패: " + e.message); }
+    setBusy(false);
+  };
+
+  const commitTable = async () => {
+    if (!map.question_column || !map.answer_column) return alert("질문/답변 열을 지정하세요.");
+    setBusy(true);
+    try {
+      const data = await api("/api/voc/excel/commit", {
+        method: "POST",
+        body: JSON.stringify({
+          upload_id: tbl.upload_id,
+          header_row: tbl.header_row,
+          question_column: map.question_column,
+          answer_column: map.answer_column,
+          require_columns: map.require_columns,
+        }),
+      });
+      setTbl(null);
+      await load(); await loadBatches();
+      const extra = data.embed_failed
+        ? `\n\n임베딩 실패 ${data.embed_failed}건(내용은 저장됐고 키워드 검색에는 잡힙니다):\n`
+          + (data.embed_errors || []).join("\n")
+        : "";
+      alert(`${data.inserted}건 등록 · ${data.skipped}건 제외${extra}`);
+    } catch (e) { alert("등록 실패: " + e.message); }
+    setBusy(false);
+  };
+
+  const colSel = (field, label) => (
+    <label style={{fontSize: 12.5, display: "flex", flexDirection: "column", gap: 4}}>
+      <span style={{color: "var(--muted)"}}>{label}</span>
+      <select value={map[field]} onChange={e => setMap({...map, [field]: e.target.value})}>
+        <option value="">(선택 안 함)</option>
+        {tbl.columns.map(c => <option key={c} value={c}>{c}</option>)}
+      </select>
+    </label>
+  );
+
+  return (
+    <div>
+      <h2>VOC 이력 관리</h2>
+
+      <div className="card">
+        <div className="toolbar">
+          <input placeholder="질문" value={form.question} onChange={e => setForm({...form, question: e.target.value})} style={{flex: 1}} />
+        </div>
+        <textarea placeholder="답변" value={form.answer} onChange={e => setForm({...form, answer: e.target.value})} rows={3} style={{width: "100%", marginTop: 8}} />
+        <div className="toolbar" style={{marginTop: 8}}>
+          <button className="primary" onClick={submit}>{editingId ? "수정 저장" : "등록"}</button>
+          {editingId && <button onClick={() => { setEditingId(null); setForm({ question: "", answer: "" }); }}>취소</button>}
+          <span style={{marginLeft: "auto", display: "flex", alignItems: "center", gap: 6}}>
+            <input type="file" accept=".xlsx,.xls,.csv,.tsv" disabled={busy}
+                   onChange={e => { importFile(e.target.files[0]); e.target.value = ""; }} />
+            <button disabled={busy} onClick={() => setShowBrowser(true)}>서버 파일에서 선택</button>
+          </span>
+        </div>
+      </div>
+
+      {tbl && (
+        <div className="card">
+          <div style={{marginBottom: 8}}>
+            <strong>열 매핑</strong> · {tbl.filename} · {tbl.sheet} · 데이터 {tbl.total_rows}행
+          </div>
+          <div className="toolbar" style={{marginBottom: 10}}>
+            <span style={{fontSize: 12.5}}>헤더 행</span>
+            <input type="number" min="1" defaultValue={tbl.header_row} style={{width: 70}}
+                   onKeyDown={e => e.key === "Enter" && importFile(lastFile, Number(e.target.value))}
+                   onBlur={e => Number(e.target.value) !== tbl.header_row
+                     && importFile(lastFile, Number(e.target.value))} />
+          </div>
+
+          <div style={{display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12}}>
+            {colSel("question_column", "질문 *")}
+            {colSel("answer_column", "답변 *")}
+          </div>
+          <div style={{fontSize: 12, color: "var(--muted)", marginBottom: 10}}>
+            필수 열:{" "}
+            {tbl.columns.map(c => (
+              <label key={c} style={{marginRight: 10}}>
+                <input type="checkbox" checked={map.require_columns.includes(c)}
+                       onChange={e => setMap({...map, require_columns: e.target.checked
+                         ? [...map.require_columns, c]
+                         : map.require_columns.filter(x => x !== c)})} /> {c}
+              </label>
+            ))}
+          </div>
+
+          {tbl.sample_rows.length > 0 && (
+            <table style={{marginBottom: 12}}>
+              <thead><tr>{tbl.columns.map(c => <th key={c}>{c}</th>)}</tr></thead>
+              <tbody>
+                {tbl.sample_rows.map((r, i) => (
+                  <tr key={i}>{tbl.columns.map((c, j) => (
+                    <td key={j} style={{color: "var(--muted)", fontSize: 12, maxWidth: 220}}>{r[j]}</td>
+                  ))}</tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="row-actions">
+            <button className="primary" disabled={busy} onClick={commitTable}>매핑대로 일괄 등록</button>
+            <button disabled={busy} onClick={() => setTbl(null)}>취소</button>
+            {busy && (
+              <span style={{fontSize: 12.5, color: "var(--muted)"}}>
+                등록 중… {tbl.total_rows}행
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showBrowser && (
+        <ServerFileBrowser
+          onClose={() => setShowBrowser(false)}
+          onPick={(path, name) => { setShowBrowser(false); importFile({ name, serverPath: path }); }}
+        />
+      )}
+
+      <div className="card">
+        <div style={{marginBottom: 8}}><strong>업로드 묶음</strong>
+        </div>
+        <table>
+          <thead><tr><th>파일</th><th>건수</th><th>올린 사람</th><th>등록일</th><th></th></tr></thead>
+          <tbody>
+            {batches.map(b => (
+              <tr key={b.batch_id} style={{background: batchId === b.batch_id ? "rgba(125,125,125,.12)" : undefined}}>
+                <td>{b.source_file || b.batch_id.slice(0, 8)}</td>
+                <td>{b.record_count}</td>
+                <td style={{fontSize: 12}}>{b.uploaded_by || "-"}</td>
+                <td style={{fontSize: 12}}>{new Date(b.uploaded_at).toLocaleString()}</td>
+                <td className="row-actions">
+                  <button onClick={() => setBatchId(batchId === b.batch_id ? "" : b.batch_id)}>
+                    {batchId === b.batch_id ? "필터 해제" : "이 묶음만 보기"}
+                  </button>
+                  <button className="danger" onClick={() => deleteBatch(b)}>묶음 삭제</button>
+                </td>
+              </tr>
+            ))}
+            {batches.length === 0 && <tr><td colSpan="5" className="empty">업로드 묶음이 없습니다.</td></tr>}
+          </tbody>
+        </table>
+        {unbatched > 0 && (
+          <div style={{fontSize: 12, color: "var(--muted)", marginTop: 6}}>
+            묶음 없는 기존 데이터 {unbatched}건
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div style={{marginBottom: 6}}><strong>처리 주체 분류</strong></div>
+        {cls && (
+          <div style={{fontSize: 12.5, marginBottom: 8}}>
+            전체 {cls.total}건 · <b>미분류 {cls.pending}건</b> ·
+            {" "}사용자 {cls.c_user} / 운영자 {cls.c_operator} / 판정보류 {cls.c_unknown}
+            {cls.progress?.running && (
+              <span style={{marginLeft: 10, color: "var(--muted)"}}>
+                {cls.progress.stopping ? "중지하는 중…" : "진행 중…"}
+                {" "}{cls.progress.done}/{cls.progress.total}
+                {" "}(판정 {cls.progress.classified} · 실패 {cls.progress.failed})
+              </span>
+            )}
+            {cls.progress?.error && (
+              <span style={{marginLeft: 10, color: "var(--danger, #c33)"}}>{cls.progress.error}</span>
+            )}
+          </div>
+        )}
+        <div className="row-actions">
+          <button disabled={cls?.progress?.running || !cls?.pending}
+                  onClick={() => runClassify(30)}>먼저 30건만</button>
+          <button className="primary" disabled={cls?.progress?.running || !cls?.pending}
+                  onClick={() => runClassify(0)}>미분류 전부</button>
+          <button className="danger" disabled={!cls?.progress?.running || cls?.progress?.stopping}
+                  onClick={stopClassify}>중지</button>
+        </div>
+      </div>
+
+      <div className="toolbar">
+        <input placeholder="질문 검색..." value={q} onChange={e => setQ(e.target.value)} style={{width: 260}} />
+        {batchId && <button onClick={() => setBatchId("")}>묶음 필터 해제</button>}
+        <button className="danger" disabled={selected.length === 0} onClick={deleteSelected}>
+          선택 삭제{selected.length > 0 ? ` (${selected.length}건)` : ""}
+        </button>
+        <span style={{marginLeft: "auto", fontSize: 12.5, color: "var(--muted)"}}>
+          총 {total}건 · {total === 0 ? 0 : offset + 1}–{Math.min(offset + PAGE, total)} 표시
+        </span>
+        <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>이전</button>
+        <button disabled={offset + PAGE >= total} onClick={() => setOffset(offset + PAGE)}>다음</button>
+      </div>
+
+      <table>
+        <thead><tr>
+          <th style={{width: 32}}>
+            <input type="checkbox" checked={allChecked} onChange={toggleAll}
+                   title="이 페이지 전체 선택" />
+          </th>
+          <th>질문</th><th>답변</th><th style={{width: 92}}>처리 주체</th><th>출처 파일</th><th>등록일</th><th></th>
+        </tr></thead>
+        <tbody>
+          {items.map(v => (
+            <tr key={v.id}>
+              <td><input type="checkbox" checked={selected.includes(v.id)} onChange={() => toggleOne(v.id)} /></td>
+              <td style={{maxWidth: 260}}>{v.question}</td>
+              <td style={{maxWidth: 320}}>{v.answer}</td>
+              <td style={{fontSize: 12}} title={v.handled_by_reason || "아직 분류하지 않았습니다"}>
+                {HANDLED_LABEL[v.handled_by] || "미분류"}
+                {v.handled_by_reason && (
+                  <div style={{color: "var(--muted)", fontSize: 11, marginTop: 2}}>
+                    {v.handled_by_reason}
+                  </div>
+                )}
+              </td>
+              <td style={{fontSize: 12, color: "var(--muted)", maxWidth: 160}}>{v.source_file || "-"}</td>
+              <td>{new Date(v.created_at).toLocaleDateString()}</td>
+              <td className="row-actions">
+                <button onClick={() => edit(v)}>편집</button>
+                <button className="danger" onClick={() => remove(v.id)}>삭제</button>
+              </td>
+            </tr>
+          ))}
+          {items.length === 0 && <tr><td colSpan="7" className="empty">기록이 없습니다.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------- 공용 컴포넌트
+function Modal({ onClose, children }) {
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+      display: "flex", alignItems: "flex-start", justifyContent: "center",
+      overflowY: "auto", padding: "40px 16px", zIndex: 100,
+    }} onClick={onClose}>
+      <div className="card" style={{maxWidth: 640, width: "100%", margin: 0}} onClick={e => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// admin-console 컨테이너에 마운트된 폴더(설정 탭 upload_source_dir) 안에서 파일을 고르는 모달.
+// 매뉴얼/VOC/커맨드 카탈로그 업로드가 공유해서 쓴다.
+function ServerFileBrowser({ onPick, onClose }) {
+  const [path, setPath] = useState("");
+  const [entries, setEntries] = useState([]);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async (p) => {
+    try {
+      const data = await api(`/api/files?path=${encodeURIComponent(p)}`);
+      setEntries(data.entries);
+      setPath(data.path || "");
+      setError("");
+    } catch (e) { setError(e.message); }
+  }, []);
+  useEffect(() => { load(""); }, [load]);
+
+  const up = () => load(path.split("/").slice(0, -1).join("/"));
+
+  return (
+    <Modal onClose={onClose}>
+      <div style={{fontWeight: 600, marginBottom: 8}}>서버 파일에서 선택</div>
+      <div style={{fontSize: 12, color: "var(--muted)", marginBottom: 8, fontFamily: "var(--mono)"}}>/{path}</div>
+      {error && (
+        <div style={{fontSize: 12.5, color: "var(--danger)", marginBottom: 8}}>
+          {error} (관리자 콘솔에 폴더가 마운트됐는지, 설정 탭 upload_source_dir 값을 확인하세요)
+        </div>
+      )}
+      {path && <div className="row-actions" style={{marginBottom: 6}}><button onClick={up}>.. 상위로</button></div>}
+      <table>
+        <tbody>
+          {entries.map(e => (
+            <tr key={e.path}>
+              <td style={{fontFamily: "var(--mono)", fontSize: 12.5, cursor: "pointer"}}
+                  onClick={() => (e.is_dir ? load(e.path) : onPick(e.path, e.name))}>
+                {e.is_dir ? "📁 " : "📄 "}{e.name}
+              </td>
+              <td style={{fontSize: 11, color: "var(--muted)"}}>
+                {e.size != null ? `${(e.size / 1024).toFixed(1)}KB` : ""}
+              </td>
+            </tr>
+          ))}
+          {entries.length === 0 && !error && <tr><td colSpan="2" className="empty">파일이 없습니다.</td></tr>}
+        </tbody>
+      </table>
+      <div className="row-actions" style={{marginTop: 10}}>
+        <button onClick={onClose}>취소</button>
+      </div>
+    </Modal>
+  );
+}
+
+
+// ---------------------------------------------------------------- Execution
+// 구 "커맨드 카탈로그" 탭 + "System MCP" 탭을 하나로 합친 화면(#111).
+// 인자 지정 방식: 관리자는 `head -n {lines} {path}`처럼 **자리표시자가 든 커맨드 한 줄**만
+// 적는다. 화면이 자리표시자를 뽑아 인자 표를 자동으로 만들고, 타입/필수/기본값만 채우게 한다.
+// argv JSON을 손으로 쓰게 하던 예전 방식보다 쉽고, 카탈로그의 {user_id} 문법과도 같다.
+const HOST_MODE_LABEL = {
+  login_server: "로그인 서버 고정",
+  target_server: "서버 지정",
+};
+const ARG_TYPE_LABEL = { str: "문자열", int: "정수", enum: "선택형" };
+// Open WebUI 계정 역할이 그대로 넘어온다. 자유 입력이면 오타 하나로 아무도 못 쓰게 된다.
+const ROLE_OPTIONS = [
+  { value: "", label: "제한 없음" },
+  { value: "user", label: "user" },
+  { value: "admin", label: "admin" },
+];
+const EMPTY_FORM = {
+  title: "", description: "", exec_command: "", args: [],
+  host_mode: "login_server", enabled: true, required_roles: [],
+};
+
+// 커맨드 한 줄에서 {이름}을 뽑는다. {user_id}는 시스템이 자동 주입하므로 인자 표에 넣지 않는다.
+function placeholdersOf(execCommand) {
+  const out = [];
+  const re = /\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g;
+  let m;
+  while ((m = re.exec(execCommand || "")) !== null) {
+    if (m[1] !== "user_id" && !out.includes(m[1])) out.push(m[1]);
+  }
+  return out;
+}
+
+function CommandForm({ form, setForm, onSubmit, onCancel, editing }) {
+  const names = placeholdersOf(form.exec_command);
+  const hasUserId = /\{user_id\}/.test(form.exec_command || "");
+
+  // 커맨드를 고치면 인자 표를 따라 맞춘다(이미 채운 값은 유지, 사라진 자리표시자는 제거).
+  useEffect(() => {
+    const byName = {};
+    (form.args || []).forEach(a => { byName[a.name] = a; });
+    const next = names.map(n => byName[n] || {
+      name: n, type: "str", required: true, default: "", description: "", choices: [],
+    });
+    if (JSON.stringify(next) !== JSON.stringify(form.args || [])) setForm({ ...form, args: next });
+  }, [form.exec_command]);
+
+  const setArg = (i, patch) => {
+    const args = form.args.map((a, j) => (i === j ? { ...a, ...patch } : a));
+    setForm({ ...form, args });
+  };
+
+  return (
+    <div className="card">
+      <div className="toolbar">
+        <input placeholder="이름" value={form.title}
+               onChange={e => setForm({ ...form, title: e.target.value })} style={{ width: 240 }} />
+        <input placeholder="실행 커맨드" value={form.exec_command}
+               onChange={e => setForm({ ...form, exec_command: e.target.value })}
+               style={{ flex: 1, minWidth: 320, fontFamily: "var(--mono)" }} />
+      </div>
+      <textarea placeholder="설명"
+                value={form.description} rows={2} style={{ width: "100%", marginTop: 8 }}
+                onChange={e => setForm({ ...form, description: e.target.value })} />
+
+      {form.args.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>
+            인자 {form.args.length}개
+          </div>
+          <table>
+            <thead>
+              <tr><th>이름</th><th>타입</th><th>필수</th><th>기본값</th><th>설명 / 선택지</th></tr>
+            </thead>
+            <tbody>
+              {form.args.map((a, i) => (
+                <tr key={a.name}>
+                  <td style={{ fontFamily: "var(--mono)" }}>{a.name}</td>
+                  <td>
+                    <select value={a.type} onChange={e => setArg(i, { type: e.target.value })}>
+                      {Object.keys(ARG_TYPE_LABEL).map(t => (
+                        <option key={t} value={t}>{ARG_TYPE_LABEL[t]}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td style={{ textAlign: "center" }}>
+                    <input type="checkbox" checked={!!a.required}
+                           onChange={e => setArg(i, { required: e.target.checked })} />
+                  </td>
+                  <td>
+                    <input value={a.default || ""} style={{ width: 90 }}
+                           disabled={!!a.required}
+                           onChange={e => setArg(i, { default: e.target.value })} />
+                  </td>
+                  <td>
+                    <input placeholder="설명" value={a.description || ""}
+                           style={{ width: "100%" }}
+                           onChange={e => setArg(i, { description: e.target.value })} />
+                    {a.type === "enum" && (
+                      <input placeholder="선택지 (콤마 구분)"
+                             value={(a.choices || []).join(",")} style={{ width: "100%", marginTop: 4 }}
+                             onChange={e => setArg(i, {
+                               choices: e.target.value.split(",").map(s => s.trim()).filter(Boolean),
+                             })} />
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="toolbar" style={{ marginTop: 10, gap: 16, flexWrap: "wrap" }}>
+        <label style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 6 }}>
+          실행 위치
+          <select value={form.host_mode} onChange={e => setForm({ ...form, host_mode: e.target.value })}>
+            {Object.keys(HOST_MODE_LABEL).map(m => (
+              <option key={m} value={m}>{HOST_MODE_LABEL[m]}</option>
+            ))}
+          </select>
+        </label>
+        <label style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 6 }}>
+          <input type="checkbox" checked={form.enabled}
+                 onChange={e => setForm({ ...form, enabled: e.target.checked })} />
+          활성
+        </label>
+        <label style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 6 }}>
+          역할
+          <select value={(form.required_roles || [])[0] || ""}
+                  onChange={e => setForm({
+                    ...form, required_roles: e.target.value ? [e.target.value] : [],
+                  })}>
+            {ROLE_OPTIONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+          </select>
+        </label>
+      </div>
+      <div className="toolbar" style={{ marginTop: 10 }}>
+        <button className="primary" onClick={onSubmit}>{editing ? "수정 저장" : "등록"}</button>
+        {editing && <button onClick={onCancel}>취소</button>}
+      </div>
+    </div>
+  );
+}
+
+function ExecutionPanel() {
+  const [view, setView] = useState("commands");
+  const [items, setItems] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [editingId, setEditingId] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [needsRestart, setNeedsRestart] = useState(false);
+  const [showBrowser, setShowBrowser] = useState(false);
+  const [edits, setEdits] = useState({});          // 행별(설명/실행위치/역할) 편집 버퍼
+  const [excel, setExcel] = useState(null);
+  const [map, setMap] = useState({ title_column: "", description_column: "", exec_command_column: "" });
+
+  const loadCommands = useCallback(async () => setItems(await api("/api/execution/commands")), []);
+  const loadLogs = useCallback(async () => setLogs(await api("/api/execution/logs")), []);
+  useEffect(() => { loadCommands(); loadLogs(); }, [loadCommands, loadLogs]);
+
+  const submit = async () => {
+    if (!form.title || !form.exec_command) return alert("이름과 실행 커맨드를 입력하세요.");
+    try {
+      const path = editingId ? `/api/execution/commands/${editingId}` : "/api/execution/commands";
+      await api(path, { method: editingId ? "PATCH" : "POST", body: JSON.stringify(form) });
+      setForm(EMPTY_FORM); setEditingId(null);
+      await loadCommands();
+      setNeedsRestart(true);
+    } catch (e) { alert(e.message); }
+  };
+
+  const edit = (row) => {
+    setForm({ ...EMPTY_FORM, ...row, args: row.args || [], required_roles: row.required_roles || [] });
+    setEditingId(row.id);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const remove = async (id) => {
+    if (!confirm("삭제할까요?")) return;
+    await api(`/api/execution/commands/${id}`, { method: "DELETE" });
+    await loadCommands();
+    setNeedsRestart(true);
+  };
+
+  // **끄면 즉시** 막힌다(실행 시점에 다시 확인한다). 반대로 **켤 때는** 툴 목록을 다시
+  // 만들어야 하므로 재시작이 필요하다 - 비활성 커맨드는 프롬프트 예산 때문에 목록에서 빼 둔다.
+  const toggleCommand = async (row) => {
+    await api(`/api/execution/commands/${row.id}/enabled`,
+              { method: "PATCH", body: JSON.stringify({ enabled: !row.enabled }) });
+    await loadCommands();
+    if (!row.enabled) setNeedsRestart(true);      // 껐던 것을 다시 켠 경우
+  };
+
+  const analyzeExcel = async (f) => {
+    if (!f) return;
+    setBusy(true); setExcel(null);
+    try {
+      const fd = new FormData();
+      if (f.serverPath) fd.append("server_path", f.serverPath); else fd.append("file", f);
+      const r = await fetch("/api/execution/commands/excel/preview", { method: "POST", body: fd });
+      if (!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      setExcel(data);
+      const guess = (cands) => data.columns.find(c => cands.some(k => c.toLowerCase().includes(k))) || "";
+      setMap({
+        title_column: guess(["name", "이름", "커맨드", "command", "명령"]),
+        description_column: guess(["desc", "설명", "내용"]),
+        exec_command_column: guess(["exec", "실행", "명령어"]),
+      });
+    } catch (e) { alert("전처리 실패: " + e.message); }
+    setBusy(false);
+  };
+
+  const commitExcel = async () => {
+    if (!map.title_column || !map.description_column) return alert("이름/설명 열을 지정하세요.");
+    setBusy(true);
+    try {
+      const data = await api("/api/execution/commands/excel/commit", {
+        method: "POST",
+        body: JSON.stringify({
+          upload_id: excel.upload_id,
+          title_column: map.title_column,
+          description_column: map.description_column,
+          exec_command_column: map.exec_command_column || null,
+        }),
+      });
+      setExcel(null);
+      await loadCommands();
+      setNeedsRestart(true);
+      const skipped = data.skipped
+        ? `\n차단 목록에 걸려 건너뜀 ${data.skipped}건:\n${(data.problems || []).join("\n")}`
+        : "";
+      alert(`반영 완료 · 신규 ${data.inserted}건, 갱신 ${data.updated}건${skipped}`);
+    } catch (e) { alert("등록 실패: " + e.message); }
+    setBusy(false);
+  };
+
+  const colSelect = (field, label, required) => (
+    <label style={{ fontSize: 12.5, display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ color: "var(--muted)" }}>{label}{required ? " *" : ""}</span>
+      <select value={map[field]} onChange={e => setMap({ ...map, [field]: e.target.value })}>
+        <option value="">(선택 안 함)</option>
+        {excel.columns.map(c => <option key={c} value={c}>{c}</option>)}
+      </select>
+    </label>
+  );
+
+  // 커맨드는 **전부 등록분 하나**다(#128). 예전에는 파이썬 함수로 박아 둔 '내장 커맨드'가
+  // 섞여 있어서 편집도 삭제도 안 됐는데, 그건 전부 LLM이 아는 표준 리눅스 명령이라 없앴다.
+  // 이제 모든 행이 똑같이 편집·삭제·on/off 된다.
+  const rowKey = (c) => `r:${c.id}`;
+
+  // 한 행에서 바로 고칠 수 있는 값(설명·실행 위치·역할)을 저장한다.
+  const saveRow = async (c, e) => {
+    const roles = e.role ? [e.role] : [];
+    try {
+      await api(`/api/execution/commands/${c.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          title: c.title, description: e.description, exec_command: c.exec_command,
+          args: c.args || [], host_mode: e.host_mode,
+          enabled: c.enabled, required_roles: roles,
+        }),
+      });
+      await loadCommands();
+      setNeedsRestart(true);
+      const next = { ...edits }; delete next[rowKey(c)]; setEdits(next);
+    } catch (err) { alert("저장 실패: " + err.message); }
+  };
+
+  const views = [
+    { id: "commands", label: `커맨드 (${items.length})` },
+    { id: "logs", label: "실행 로그" },
+  ];
+
+  return (
+    <div>
+      <h2>커맨드 실행</h2>
+
+      {needsRestart && (
+        <div className="card" style={{ borderColor: "var(--warn)", color: "var(--warn)", fontSize: 12.5 }}>
+          변경 사항을 반영하려면 <strong>execution-mcp 재시작</strong>이 필요합니다.
+          <button className="primary" style={{ marginLeft: 10 }}
+                  onClick={async () => { await restartService("execution-mcp"); setNeedsRestart(false); }}>
+            지금 재시작
+          </button>
+        </div>
+      )}
+
+      <div className="toolbar" style={{ marginBottom: 12 }}>
+        {views.map(v => (
+          <button key={v.id} className={view === v.id ? "primary" : ""}
+                  onClick={() => setView(v.id)}>{v.label}</button>
+        ))}
+      </div>
+
+      {view === "commands" && (
+        <React.Fragment>
+          <CommandForm form={form} setForm={setForm} onSubmit={submit} editing={!!editingId}
+                       onCancel={() => { setEditingId(null); setForm(EMPTY_FORM); }} />
+
+          <div className="toolbar" style={{ marginBottom: 4 }}>
+            <a href="/api/execution/commands/template.xlsx?mode=template" download>
+              <button type="button">엑셀 양식 받기</button>
+            </a>
+            <a href="/api/execution/commands/template.xlsx?mode=current" download>
+              <button type="button">현재 등록분 내보내기</button>
+            </a>
+            <input type="file" accept=".xlsx,.xls,.csv,.tsv" disabled={busy}
+                   onChange={e => { analyzeExcel(e.target.files[0]); e.target.value = ""; }} />
+            <button disabled={busy} onClick={() => setShowBrowser(true)}>서버 파일에서 선택</button>
+          </div>
+
+          {showBrowser && (
+            <ServerFileBrowser
+              onClose={() => setShowBrowser(false)}
+              onPick={(path, name) => { setShowBrowser(false); analyzeExcel({ name, serverPath: path }); }} />
+          )}
+
+          {excel && (
+            <div className="card">
+              <div style={{ marginBottom: 8 }}>
+                <strong>열 매핑</strong> · {excel.filename} · {excel.total_rows}행 · 헤더 {excel.header_row}행
+              </div>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
+                {colSelect("title_column", "이름", true)}
+                {colSelect("description_column", "설명", true)}
+                {colSelect("exec_command_column", "실행 커맨드", false)}
+              </div>
+              <div className="row-actions">
+                <button className="primary" disabled={busy} onClick={commitExcel}>매핑대로 일괄 등록</button>
+                <button onClick={() => setExcel(null)}>취소</button>
+              </div>
+            </div>
+          )}
+
+          <table>
+            <thead>
+              <tr><th>활성</th><th>이름</th><th>실행 커맨드</th>
+                  <th>실행 위치</th><th>설명</th><th>역할</th><th></th></tr>
+            </thead>
+            <tbody>
+              {items.map(c => {
+                const key = rowKey(c);
+                const e = edits[key] || {
+                  description: c.description || "",
+                  role: (c.required_roles || [])[0] || "",
+                  host_mode: c.host_mode,
+                };
+                const setE = (patch) => setEdits({ ...edits, [key]: { ...e, ...patch } });
+                return (
+                  <tr key={key}>
+                    <td style={{ textAlign: "center" }}>
+                      <input type="checkbox" checked={c.enabled}
+                             onChange={() => toggleCommand(c)} />
+                    </td>
+                    <td>{c.title}</td>
+                    <td style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{c.exec_command}</td>
+                    <td>
+                      <select value={e.host_mode} onChange={ev => setE({ host_mode: ev.target.value })}>
+                        {Object.keys(HOST_MODE_LABEL).map(m => (
+                          <option key={m} value={m}>{HOST_MODE_LABEL[m]}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <input value={e.description} style={{ width: "100%" }}
+                             onChange={ev => setE({ description: ev.target.value })} />
+                    </td>
+                    <td>
+                      <select value={e.role} onChange={ev => setE({ role: ev.target.value })}>
+                        {ROLE_OPTIONS.map(r => (
+                          <option key={r.value} value={r.value}>{r.label}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="row-actions">
+                      {key in edits
+                        ? <button className="primary" onClick={() => saveRow(c, e)}>저장</button>
+                        : null}
+                      <button onClick={() => edit(c)}>편집</button>
+                      <button className="danger" onClick={() => remove(c.id)}>삭제</button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {items.length === 0
+                ? <tr><td colSpan="7" className="empty">커맨드가 없습니다.</td></tr> : null}
+            </tbody>
+          </table>
+        </React.Fragment>
+      )}
+
+      {view === "logs" && (
+        <table>
+          <thead><tr><th>시각</th><th>툴</th><th>요청자</th><th>상태</th><th>파라미터</th><th>결과</th></tr></thead>
+          <tbody>
+            {logs.map(l => (
+              <tr key={l.id}>
+                <td style={{ fontSize: 11.5 }}>{new Date(l.created_at).toLocaleString()}</td>
+                <td style={{ fontFamily: "var(--mono)" }}>{l.tool_name}</td>
+                <td>{l.requested_by}</td>
+                <td><Badge value={l.status} /></td>
+                <td><pre className="result">{JSON.stringify(l.params, null, 1)}</pre></td>
+                <td><pre className="result">{JSON.stringify(l.result, null, 1)}</pre></td>
+              </tr>
+            ))}
+            {logs.length === 0 && <tr><td colSpan="6" className="empty">실행 이력이 없습니다.</td></tr>}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Settings
+// service_hub_mcp_url은 방화벽 개통 후 넣는 실제 외부 주소라 자유 입력, 나머지 *_mcp_url은
+// 같은 docker compose 스택의 내부망 컨테이너 이름이라 포트만 바꾸게 제한한다.
+const INTERNAL_MCP_URL_RE = /^(https?:\/\/[^:/]+:)(\d+)(\/.*)?$/;
+const isInternalMcpUrl = (key) => key.endsWith("_mcp_url") && key !== "service_hub_mcp_url";
+
+// "재시작 필요" 값을 저장한 뒤 바로 눌러서 반영할 수 있는 서비스 매핑(System MCP 탭도 재사용).
+const RESTART_SERVICE_FOR_KEY = {
+  manual_mcp_url: "manual-mcp",
+  execution_mcp_url: "execution-mcp",
+  voc_mcp_url: "voc-mcp",
+  chart_mcp_url: "chart-mcp",
+  agent_system_instruction: "agent-server",
+};
+
+async function restartService(service) {
+  if (!confirm(`'${service}' 컨테이너를 지금 재시작할까요? (짧게 서비스가 끊깁니다)`)) return;
+  try {
+    const data = await api(`/api/ops/restart/${encodeURIComponent(service)}`, { method: "POST" });
+    alert(`재시작했습니다: ${data.restarted.join(", ")}`);
+  } catch (e) {
+    alert("재시작 실패: " + e.message);
+  }
+}
+
+async function syncOpenWebUIModel() {
+  try {
+    const data = await api("/api/ops/sync-openwebui-model", { method: "POST" });
+    alert(`Open WebUI 기본 모델을 "${data.default_model}"(으)로 지정했습니다.`);
+  } catch (e) {
+    alert("동기화 실패: " + e.message);
+  }
+}
+
+// 화면에 보여줄 설정만, 그룹 순서대로. 여기 없는 키는 표시하지 않는다
+// (내부 튜닝값까지 다 늘어놓으면 정작 바꿔야 할 값을 찾기 어렵다).
+//
+// **여기가 허용 목록이다.** 설정 키를 새로 만들고 db-init까지 돌려도 이 목록에 없으면
+// 화면에 나타나지 않는다 — #155~#160에서 만든 다섯 개(rag_prefetch, *_prefetch_top_k,
+// voc_classify_*)가 그렇게 안 보이는 채로 남아 있었고, 문서로는 "설정 탭에서 바꾸세요"라고
+// 계속 안내하고 있었다. 회귀 테스트가 NEXT-STEPS에 적은 키와 이 목록을 대조한다.
+//
+// **한 MCP의 값은 그 MCP 구역에 모은다**(사용자 지시). 그 값을 읽는 프로세스가 어디든
+// 상관없다 — 관리자는 "매뉴얼 관련 설정"을 찾지 "agent-server가 읽는 설정"을 찾지 않는다.
+// 그래서 선검색 개수(agent-server가 읽는다)도 각각 Manual/VOC 구역에 있다.
+const SETTING_GROUPS = [
+  { title: "에이전트", service: "agent-server",
+    keys: ["agent_system_instruction", "agent_api_key", "answer_grounding_check",
+           "rag_prefetch", "llm_temperature", "llm_streaming",
+           "history_max_chars", "show_tool_activity"] },
+  { title: "LLM", service: "agent-server",
+    keys: ["vllm_llm_base_url", "vllm_llm_model"] },
+  { title: "임베딩 · 리랭커", service: null,
+    keys: ["vllm_embed_base_url", "vllm_embed_model", "embed_dim",
+           "rerank_provider", "rerank_base_url", "rerank_model", "rerank_min_score"] },
+  { title: "Manual MCP", service: "manual-mcp",
+    keys: ["manual_mcp_url", "manual_prefetch_top_k", "manual_result_max_chars",
+           "manual_neighbor_window"] },
+  { title: "Execution MCP", service: "execution-mcp",
+    keys: ["execution_mcp_url", "execution_host", "execution_result_max_chars",
+           "execution_tools_max", "execution_deny_commands", "execution_user_scope_flags",
+           "execution_raw_output", "execution_raw_output_min_lines",
+           "execution_raw_output_max_chars", "execution_raw_output_summary"] },
+  { title: "VOC MCP", service: "voc-mcp",
+    keys: ["voc_mcp_url", "voc_prefetch_top_k", "voc_result_max_chars",
+           "voc_classify_batch", "voc_classify_concurrency", "voc_intake_guide"] },
+  { title: "Chart MCP", service: "chart-mcp",
+    keys: ["chart_mcp_url", "chart_max_points", "chart_retention_hours"] },
+  { title: "Open WebUI", service: null,
+    keys: ["openwebui_public_url", "openwebui_base_url", "openwebui_admin_api_key"] },
+];
+
+function SettingsPanel() {
+  const [settings, setSettings] = useState([]);
+  const [edits, setEdits] = useState({});
+
+  const load = useCallback(async () => setSettings(await api("/api/settings")), []);
+  useEffect(() => { load(); }, [load]);
+
+  const save = async (key) => {
+    if (!(key in edits)) return;
+    const r = await api(`/api/settings/${encodeURIComponent(key)}`, {
+      method: "PUT", body: JSON.stringify({ value: edits[key] }) });
+    const next = { ...edits }; delete next[key]; setEdits(next);
+    await load();
+    if (r && r.openwebui_default_model) {
+      alert(`저장했습니다.\nOpen WebUI 기본 모델을 "${r.openwebui_default_model}"(으)로 지정했습니다.`);
+    } else if (r && r.openwebui_sync_error) {
+      alert(`저장했습니다.\n기본 모델 지정은 실패했습니다: ${r.openwebui_sync_error}`);
+    } else {
+      alert("저장했습니다.");
+    }
+  };
+
+  const resetInstruction = async () => {
+    if (!confirm("지시문을 코드의 최신 기본값으로 되돌릴까요?\n직접 고친 문구가 있으면 사라집니다."))
+      return;
+    try {
+      const r = await api("/api/settings/agent_system_instruction/reset", { method: "POST" });
+      const next = { ...edits }; delete next.agent_system_instruction; setEdits(next);
+      await load();
+      alert(`되돌렸습니다(${r.chars.toLocaleString()}자). agent-server 재시작이 필요합니다.`);
+      await restartService("agent-server");     // 이 함수가 확인창을 띄운다
+    } catch (e) { alert("되돌리기 실패: " + e.message); }
+  };
+
+  const byKey = {};
+  settings.filter(s => !s.env_managed).forEach(s => { byKey[s.key] = s; });
+
+  const field = (s) => {
+    const isLong = s.key === "agent_system_instruction";
+    const val = s.key in edits ? edits[s.key] : (s.is_secret ? "" : s.value);
+    const dirty = s.key in edits;
+    return (
+      <div key={s.key} style={{marginBottom: 12}}>
+        <div style={{fontSize: 12.5, marginBottom: 4, display: "flex", gap: 8, alignItems: "center"}}>
+          <span style={{fontFamily: "var(--mono)"}}>{s.key}</span>
+          {!s.hot_reload && <span className="badge disabled">재시작 필요</span>}
+        </div>
+        <div style={{display: "flex", gap: 8, alignItems: "flex-start"}}>
+          {isLong
+            ? <textarea style={{flex: 1}} rows={10} value={val}
+                        onChange={e => setEdits({ ...edits, [s.key]: e.target.value })} />
+            : <input style={{flex: 1}}
+                     placeholder={s.is_secret ? `(마스킹됨: ${s.value})` : ""}
+                     value={val}
+                     onChange={e => setEdits({ ...edits, [s.key]: e.target.value })} />}
+          <button className="primary" disabled={!dirty} onClick={() => save(s.key)}>저장</button>
+        </div>
+        {isLong && (
+          // 지시문은 non-force 시드라 db-init을 다시 돌려도 기존 값을 안 덮는다. 그래서 코드가
+          // 바뀔 때마다 1만 자짜리 전문을 사람이 복사·붙여넣기 해 왔다 - 그걸 버튼으로 끝낸다.
+          <div style={{marginTop: 6}}>
+            <button onClick={resetInstruction}>지시문을 최신 기본값으로 되돌리기</button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <h2>설정</h2>
+
+      {SETTING_GROUPS.map(g => {
+        const rows = g.keys.map(k => byKey[k]).filter(Boolean);
+        if (!rows.length) return null;
+        return (
+          <div className="card" key={g.title}>
+            <div className="toolbar" style={{justifyContent: "space-between", marginBottom: 10}}>
+              <strong>{g.title}</strong>
+              {g.service && (
+                <button onClick={() => restartService(g.service)}>{g.service} 재시작</button>
+              )}
+            </div>
+            {rows.map(field)}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Accounts
+function AccountsPanel() {
+  const [accounts, setAccounts] = useState([]);
+  const [form, setForm] = useState({ username: "", password: "" });
+  const [pwEdits, setPwEdits] = useState({}); // username -> new password
+
+  const load = useCallback(async () => setAccounts(await api("/api/accounts")), []);
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    if (!form.username || !form.password) return alert("아이디/비밀번호를 입력하세요.");
+    try {
+      await api("/api/accounts", { method: "POST", body: JSON.stringify(form) });
+      setForm({ username: "", password: "" });
+      await load();
+    } catch (e) { alert(e.message); }
+  };
+
+  const changePassword = async (username) => {
+    const pw = pwEdits[username];
+    if (!pw) return;
+    try {
+      await api(`/api/accounts/${encodeURIComponent(username)}/password`, {
+        method: "PUT", body: JSON.stringify({ password: pw }),
+      });
+      setPwEdits(p => { const n = { ...p }; delete n[username]; return n; });
+      alert("비밀번호를 변경했습니다.");
+    } catch (e) { alert(e.message); }
+  };
+
+  const remove = async (username) => {
+    if (!confirm(`'${username}' 계정을 삭제할까요?`)) return;
+    await api(`/api/accounts/${encodeURIComponent(username)}`, { method: "DELETE" });
+    await load();
+  };
+
+  return (
+    <div>
+      <h2>계정 관리</h2>
+
+      <div className="card">
+        <div style={{fontWeight: 600, marginBottom: 8}}>새 계정 추가</div>
+        <div className="toolbar">
+          <input placeholder="아이디" value={form.username}
+            onChange={e => setForm({...form, username: e.target.value})} style={{width: 200}} />
+          <input type="password" placeholder="비밀번호(8자 이상)" value={form.password}
+            onChange={e => setForm({...form, password: e.target.value})} style={{width: 200}} />
+          <button className="primary" onClick={create}>추가</button>
+        </div>
+      </div>
+
+      <table>
+        <thead><tr><th>아이디</th><th>구분</th><th>생성</th><th>비밀번호 변경</th><th></th></tr></thead>
+        <tbody>
+          {accounts.map(a => (
+            <tr key={a.username}>
+              <td style={{fontFamily: "var(--mono)"}}>{a.username}</td>
+              <td>{a.env_account ? <span className="badge enabled">.env 기본 계정</span> : "콘솔 등록"}</td>
+              <td style={{fontSize: 11.5, color: "var(--muted)"}}>
+                {a.created_at ? new Date(a.created_at).toLocaleString() : "-"}
+              </td>
+              <td>
+                {!a.env_account && (
+                  <div className="toolbar">
+                    <input type="password" placeholder="새 비밀번호" style={{width: 160}}
+                      value={pwEdits[a.username] || ""}
+                      onChange={e => setPwEdits({...pwEdits, [a.username]: e.target.value})} />
+                    <button disabled={!pwEdits[a.username]} onClick={() => changePassword(a.username)}>변경</button>
+                  </div>
+                )}
+              </td>
+              <td className="row-actions">
+                {!a.env_account && <button className="danger" onClick={() => remove(a.username)}>삭제</button>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- App
+function App() {
+  const [tab, setTab] = useState("manuals");
+  const tabs = [
+    { id: "manuals", label: "매뉴얼" },
+    { id: "voc", label: "VOC 이력" },
+    { id: "execution", label: "커맨드 실행" },
+    { id: "settings", label: "설정" },
+    { id: "accounts", label: "계정 관리" },
+  ];
+  return (
+    <React.Fragment>
+      <div className="sidebar">
+        <h1>Agent Platform</h1>
+        {tabs.map(t => (
+          <div key={t.id} className={`nav-item ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>{t.label}</div>
+        ))}
+      </div>
+      <div className="main">
+        {tab === "manuals" && <ManualsPanel />}
+        {tab === "voc" && <VocPanel />}
+        {tab === "execution" && <ExecutionPanel />}
+        {tab === "settings" && <SettingsPanel />}
+        {tab === "accounts" && <AccountsPanel />}
+      </div>
+    </React.Fragment>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+<script>
+  // 의존성(React/ReactDOM/Babel)이 전부 로드된 뒤 인라인 babel 스크립트를 트랜스파일·실행한다.
+  window.__depsReady = function () {
+    if (window.Babel) window.Babel.transformScriptTags();
+  };
+</script>
+</body>
+</html>

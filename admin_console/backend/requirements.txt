@@ -1,0 +1,10 @@
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+asyncpg==0.31.0
+httpx==0.28.1
+openpyxl==3.1.5
+python-pptx==1.0.2
+redis==5.2.1
+bcrypt==4.2.1
+docker==7.1.0

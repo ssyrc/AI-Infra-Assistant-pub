@@ -1,0 +1,332 @@
+# 프로덕션 (bare-metal + docker compose)
+#
+# 보안 원칙:
+# - 외부에 노출하는 것은 reverse proxy가 앞단에 붙는 웹 3개뿐(open-webui/admin-console/langfuse-web).
+#   PostgreSQL·Redis·MCP·Agent Server는 호스트 포트를 열지 않고 내부 네트워크로만 통신한다.
+# - 이미지 태그는 latest/main 대신 고정 버전을 사용한다.
+# - 기동 순서: postgres(healthy) -> db-init(마이그레이션 완료) -> 나머지 서비스
+
+# 폐쇄망: 사내 미러 레지스트리를 .env로 지정한다(기본은 공개 레지스트리).
+#   REGISTRY_DOCKERHUB=pypi.example.com/proxy-docker-registry-1.docker.io
+#   REGISTRY_GHCR=pypi.example.com/proxy-docker-ghcr.io
+x-py-build-args: &pyargs
+  PYTHON_IMAGE: ${REGISTRY_DOCKERHUB:-docker.io}/python:3.11-slim-bullseye
+  # 폐쇄망 pip 미러/프록시(.env). 비우면 공개 PyPI 직접.
+  PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+  PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
+  BUILD_PROXY: ${BUILD_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-}
+
+x-mcp-build-args: &mcpargs
+  <<: *pyargs
+  APT_MIRROR: ${APT_MIRROR:-}
+  APT_HTTP_TIMEOUT: ${APT_HTTP_TIMEOUT:-10}
+
+x-mcp-image: &mcpimage
+  image: ai-infra-assistant-mcp:prod
+  build: { context: ., dockerfile: mcp_servers/Dockerfile, args: *mcpargs }
+
+services:
+  postgres:
+    image: ${REGISTRY_DOCKERHUB:-docker.io}/pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./shared/init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent} -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # 스키마 마이그레이션 + 설정 부트스트랩(원샷). 완료되어야 앱 서비스가 시작된다.
+  db-init:
+    build:
+      context: .
+      dockerfile: shared/Dockerfile.db-init
+      args: *pyargs
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      # 주소류 부트스트랩 기본값(.env 단일 관리). 최초 1회만 platform_settings에 주입되고,
+      # 이후에는 관리자 콘솔 '설정' 탭이 런타임 단일 소스가 된다.
+      VLLM_LLM_BASE_URL: ${VLLM_LLM_BASE_URL:-http://CHANGE-ME:8000/v1}
+      VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-qwen3-32b}
+      VLLM_EMBED_BASE_URL: ${VLLM_EMBED_BASE_URL:-http://CHANGE-ME:8010/v1}
+      VLLM_EMBED_MODEL: ${VLLM_EMBED_MODEL:-bge-m3}
+      EMBED_DIM: ${EMBED_DIM:-1024}
+      RERANK_PROVIDER: ${RERANK_PROVIDER:-tei}
+      RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+      RERANK_MODEL: ${RERANK_MODEL:-bge-reranker-v2-m3}
+      EXECUTION_HOST: ${EXECUTION_HOST:-10.0.0.100}
+      OPENWEBUI_PUBLIC_URL: ${OPENWEBUI_PUBLIC_URL:-http://10.0.0.30:8502}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  manual-mcp:
+    <<: *mcpimage
+    command: ["python", "mcp_servers/manual_mcp/server.py"]
+    environment:
+      CONFIG_DB_DSN: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD}@postgres:5432/platform_config
+      MCP_PORT: "8001"
+    expose: ["8001"]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # 커맨드 실행 전담(구 command-mcp + system-mcp). 콘솔 등록 커맨드 + run_command.
+  execution-mcp:
+    <<: *mcpimage
+    command: ["python", "mcp_servers/execution_mcp/server.py"]
+    environment:
+      CONFIG_DB_DSN: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD}@postgres:5432/platform_config
+      MCP_PORT: "8002"
+      # 대상 서버로 ssh(root) 후 `su - <user>`로 강등 실행 -> 아래 마운트가 필요하다.
+      HOSTS_FILE: /etc/hosts.targets      # 대상 서버 IP 매핑(호스트 /etc/hosts)
+      SSH_KEY: /root/.ssh/id_ed25519      # 대상 서버에 root로 접속 가능한 개인키
+      SSH_ROOT_USER: root
+      SSH_CONNECT_TIMEOUT: "8"
+      SSH_COMMAND_TIMEOUT: ${SSH_COMMAND_TIMEOUT:-120}
+      # 연결 다중화. 커맨드마다 TCP+키교환+로그인 셸을 새로 열면 1~3초씩 붙는다.
+      SSH_MULTIPLEX: ${SSH_MULTIPLEX:-true}
+      SSH_CONTROL_PERSIST: ${SSH_CONTROL_PERSIST:-3600}
+      SSH_ALIVE_INTERVAL: ${SSH_ALIVE_INTERVAL:-30}
+      # 권한 강등 방식: su-login(기본) | su | runuser
+      #   su-login  `su - <user> -c` 로그인 셸. 프로필을 매번 읽어 실측 약 2초.
+      #   su        프로필 안 읽음. PATH가 기본값이 된다.
+      #   runuser   PAM 인증·프로필 모두 건너뜀. 보통 제일 빠르고 인용도 한 겹이다.
+      # **먼저 scripts/bench-exec.sh 로 셋 다 재 보고**, 실제 커맨드가 정상 동작하는 것 중
+      # 가장 빠른 것으로 바꾼다(사내 커맨드가 프로필 PATH에 의존하면 su-login만 동작한다).
+      SSH_PRIVDROP: ${SSH_PRIVDROP:-su-login}
+    volumes:
+      - /etc/hosts:/etc/hosts.targets:ro
+      - ${SSH_KEY_PATH:-/root/.ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+    expose: ["8002"]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # 참고: 커맨드는 전부 관리자 콘솔 실행 탭에 등록한 것이다(코드에 박힌 내장 커맨드는 없다).
+    # 대상 서버에는 su가 있고 root가 해당 user로 강등 가능해야 한다(리눅스 표준).
+
+  voc-mcp:
+    <<: *mcpimage
+    command: ["python", "mcp_servers/voc_mcp/server.py"]
+    environment:
+      CONFIG_DB_DSN: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD}@postgres:5432/platform_config
+      MCP_PORT: "8003"
+    expose: ["8003"]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # 차트 생성. ssh/DB를 쓰지 않고, 호출자가 준 숫자만 SVG로 그린다.
+  # 생성된 SVG는 같은 포트의 /charts/<이름>.svg로 **사용자 브라우저에 직접** 서빙되므로
+  # 이 서비스만 호스트 포트를 연다(설정 chart_public_base_url이 이 주소를 가리켜야 한다).
+  chart-mcp:
+    <<: *mcpimage
+    command: ["python", "mcp_servers/chart_mcp/server.py"]
+    environment:
+      CONFIG_DB_DSN: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD}@postgres:5432/platform_config
+      MCP_PORT: "8005"
+      CHART_OUTPUT_DIR: /app/charts
+    volumes:
+      - chart_files:/app/charts
+    ports: ["${CHART_MCP_PORT:-8509}:8005"]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  agent-server:
+    build: { context: ., dockerfile: agent_server/Dockerfile, args: *pyargs }
+    environment:
+      CONFIG_DB_DSN: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD}@postgres:5432/platform_config
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse-web:3000}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+    expose: ["8000"]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      manual-mcp:
+        condition: service_started
+      execution-mcp:
+        condition: service_started
+      voc-mcp:
+        condition: service_started
+      chart-mcp:
+        condition: service_started
+    restart: unless-stopped
+
+  admin-console:
+    build: { context: ., dockerfile: admin_console/Dockerfile, args: *pyargs }
+    environment:
+      CONFIG_DB_DSN: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD}@postgres:5432/platform_config
+      ADMIN_USER: ${ADMIN_USER:?ADMIN_USER를 .env에 설정하세요}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD를 .env에 설정하세요}
+    volumes:
+      # "서버 파일에서 선택" 업로드용. 호스트 경로는 .env의 UPLOAD_SOURCE_HOST_DIR로 바꿀 수 있다.
+      - ${UPLOAD_SOURCE_HOST_DIR:-/home/users/ops.user/deploy/datasets}:/data/uploads:ro
+      # 설정/화이트리스트 저장 후 "지금 재시작" 버튼용. admin-console에 사실상 호스트 권한을
+      # 주는 마운트이니(임의 컨테이너 실행 가능), 신뢰된 관리자망에서만 쓴다는 전제.
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "127.0.0.1:${ADMIN_PORT:-8501}:8080"   # reverse proxy를 통해서만 공개
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  open-webui:
+    image: ${REGISTRY_GHCR:-ghcr.io}/open-webui/open-webui:v0.6.5
+    environment:
+      OPENAI_API_BASE_URL: http://agent-server:8000/v1
+      OPENAI_API_KEY: not-needed
+      # 로그인 사용자 정보를 X-OpenWebUI-User-Id/-Email/-Role/-Chat-Id 헤더로 agent-server에
+      # 전달한다. user_scoped 툴의 본인 식별과 역할 검증에 필요하다.
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
+      # 우리 모델 하나만 쓰므로 Open WebUI 내장 Arena 비교 모델은 끈다(모델 목록에 아예 안 뜸).
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
+    volumes:
+      - open_webui_data:/app/backend/data
+    ports:
+      - "127.0.0.1:${OPENWEBUI_PORT:-8502}:8080"
+    depends_on:
+      agent-server:
+        condition: service_started
+    restart: unless-stopped
+
+  # --- Langfuse v3 스택 ---------------------------------------------------------
+  langfuse-web:
+    image: ${REGISTRY_DOCKERHUB:-docker.io}/langfuse/langfuse:3.130.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${LANGFUSE_PORT:-8509}:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD}@postgres:5432/langfuse
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:8509}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?설정 필요}
+      SALT: ${LANGFUSE_SALT:?설정 필요}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?openssl rand -hex 32 로 생성해 설정}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_INIT_ORG_ID: default-org
+      LANGFUSE_INIT_PROJECT_ID: default-project
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+    restart: unless-stopped
+
+  langfuse-worker:
+    image: ${REGISTRY_DOCKERHUB:-docker.io}/langfuse/langfuse-worker:3.130.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD}@postgres:5432/langfuse
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+    restart: unless-stopped
+
+  clickhouse:
+    image: ${REGISTRY_DOCKERHUB:-docker.io}/clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?설정 필요}
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: ${REGISTRY_DOCKERHUB:-docker.io}/redis:7.4-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?설정 필요}",
+              "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    restart: unless-stopped
+
+  minio:
+    image: ${REGISTRY_DOCKERHUB:-docker.io}/minio/minio:RELEASE.2024-11-07T00-52-20Z
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:?설정 필요}
+    volumes:
+      - minio_data:/data
+    entrypoint: sh -c 'mkdir -p /data/langfuse && minio server /data --console-address ":9001"'
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  # 생성된 차트 SVG(컨테이너를 다시 만들어도 최근 대화의 그림이 깨지지 않게).
+  chart_files:
+  open_webui_data:
+  clickhouse_data:
+  minio_data:

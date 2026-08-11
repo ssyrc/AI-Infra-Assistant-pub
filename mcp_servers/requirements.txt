@@ -1,0 +1,6 @@
+# 폐쇄망 재현성을 위해 버전 고정. MCP SDK는 major 상한을 둔다.
+mcp>=1.28.1,<2.0.0
+uvicorn[standard]==0.34.0
+asyncpg==0.31.0
+httpx==0.28.1
+redis==5.2.1

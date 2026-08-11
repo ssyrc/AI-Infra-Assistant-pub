@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.db
+admin_console/frontend/vendor/*.js
+.DS_Store
+docling_cache/
+dist/
+# ssh 개인키. 저장소에 절대 넣지 않는다(서버에만 둔다).
+secrets/
+node_modules/
