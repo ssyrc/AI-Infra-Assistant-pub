@@ -61,6 +61,7 @@ NOT_ACCOUNT_SUFFIX = {
     "out", "err", "lock", "toml", "xml", "cfg", "conf", "ini", "env", "example",
     "bak", "tmp", "old", "new", "sample", "template", "pem", "crt", "key", "pub",
     "service", "socket", "timer", "list", "path", "sys", "db", "dat", "dump",
+    "hwp", "hwpx", "msg", "eml", "jar", "war", "exe", "bat", "cmd", "ps1",
     # 도메인 꼬리
     "com", "net", "org", "io", "kr", "co", "jp", "cn", "us", "eu", "ai", "app",
     "cloud", "gov", "edu", "ac", "info", "biz", "local", "internal", "dev",
@@ -80,9 +81,25 @@ def is_masked_account(token: str) -> bool:
     return tok.rsplit(".", 1)[-1].lower() not in NOT_ACCOUNT_SUFFIX
 
 
+# 주소(URL) 안의 `말.말`은 계정이 아니라 **호스트 이름**이다. 이걸 가리면 문서 안내가
+# 통째로 사라진다 - 실제로 정상 답변에서 안내 줄 하나가 "남의 계정"으로 걸려 빠졌다(#178).
+_URL_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.\-]*://|www\.)[^\s<>\"')\]]+")
+
+
+def _url_spans(text: str) -> list[tuple[int, int]]:
+    return [m.span() for m in _URL_RE.finditer(text or "")]
+
+
+def _in_url(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(a <= pos < b for a, b in spans)
+
+
 def find_accounts(text: str | None) -> list[str]:
-    """텍스트에 든 계정처럼 보이는 토큰(중복 제거, 등장 순서)."""
-    return [t for t in dict.fromkeys(ACCOUNT_RE.findall(text or "")) if is_masked_account(t)]
+    """텍스트에 든 계정처럼 보이는 토큰(중복 제거, 등장 순서). 주소 안은 보지 않는다."""
+    spans = _url_spans(text or "")
+    found = [m.group(0) for m in ACCOUNT_RE.finditer(text or "")
+             if not _in_url(m.start(), spans) and is_masked_account(m.group(0))]
+    return list(dict.fromkeys(found))
 
 # 한국 성씨(빈도순 상위). 성+이름 2~3자가 하나의 토큰으로 붙어 있을 때만 이름으로 본다.
 _SURNAMES = (
@@ -104,10 +121,6 @@ def _org_repl(m: re.Match) -> str:
     return "{" + m.group(1) + "명}"
 
 
-def _account_repl(m: re.Match) -> str:
-    return USER_ID if is_masked_account(m.group(0)) else m.group(0)
-
-
 def mask_accounts(text: str | None) -> str | None:
     """**계정과 이메일만** 가린다(이름·조직은 그대로).
 
@@ -117,7 +130,15 @@ def mask_accounts(text: str | None) -> str | None:
     """
     if not text:
         return text
-    return ACCOUNT_RE.sub(_account_repl, _EMAIL_RE.sub(USER_ID, text))
+    out = _EMAIL_RE.sub(USER_ID, text)
+    spans = _url_spans(out)          # 치환 뒤 문자열 기준으로 위치를 잡는다
+
+    def repl(m: re.Match) -> str:
+        if _in_url(m.start(), spans) or not is_masked_account(m.group(0)):
+            return m.group(0)
+        return USER_ID
+
+    return ACCOUNT_RE.sub(repl, out)
 
 
 def mask_pii(text: str | None) -> str | None:

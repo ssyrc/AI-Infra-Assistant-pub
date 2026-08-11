@@ -133,6 +133,30 @@ async def _log_tool_inventory(toolsets: list):
                   f"보이지 않습니다: {type(e).__name__}: {e}")
 
 
+async def _warn_if_instruction_is_stale():
+    """DB의 시스템 지시문이 **코드의 최신본과 다르면** 기동 로그에 크게 남긴다 (#178).
+
+    지시문은 non-force 시드다 — 코드를 고치고 배포해도 기존 DB의 값은 그대로다(관리자가
+    손댄 문구를 지우면 안 되므로 옳은 설계다). 문제는 그게 **조용하다**는 것이다.
+    #158·#176·#177에서 지시문에 넣은 규칙이 전부 반영 안 된 채로, 우리는 "지시문에 적었는데
+    왜 안 지키지"를 세 턴 동안 논의했다. 조용한 실패를 눈에 보이게 만든다.
+
+    되돌리기는 콘솔 설정 탭의 버튼이고, 확인은 `scripts/check-instruction.sh`다.
+    """
+    try:
+        from agent_instruction import AGENT_INSTRUCTION
+        current = (await get_config("agent_system_instruction", "") or "").strip()
+    except Exception as e:  # noqa: BLE001
+        print(f"[agent] 지시문 확인 실패(무시): {type(e).__name__}: {e}")
+        return
+    if not current or current == AGENT_INSTRUCTION.strip():
+        return
+    print("[agent] !! DB의 시스템 지시문이 코드의 최신본과 다릅니다. 최근에 넣은 규칙이 "
+          "모델에게 전달되지 않습니다 — 콘솔 설정 탭의 "
+          "'지시문을 최신 기본값으로 되돌리기' 버튼을 누른 뒤 agent-server를 재시작하세요 "
+          "(확인: bash scripts/check-instruction.sh).")
+
+
 async def require_api_key(request: Request):
     """`/v1/*` 호출을 API 키로 인증한다(설정된 경우에만).
 
@@ -162,6 +186,7 @@ async def lifespan(app: FastAPI):
     _agent, _model_name, toolsets = await build_agent()
     await _log_tool_inventory(toolsets)
     await _close_toolsets(toolsets)
+    await _warn_if_instruction_is_stale()
     session_db_dsn = await get_config("agent_session_db_dsn")
     if not session_db_dsn:
         raise RuntimeError("agent_session_db_dsn이 설정되지 않았습니다.")
@@ -638,6 +663,9 @@ class _AnswerGuard:
         self.intake = (intake or "").strip()
         self.user_id = (user_id or "").strip().lower()
         self.searched_manual = False
+        # 선검색을 건너뛴 질문인가 (#177). 그때는 "매뉴얼에서 확인되지 않았습니다"가
+        # **거짓말**이다 - 찾아보지 않았다. `_prepare`가 정해 준다.
+        self.routed_execution = False
         self.corpus = [question or "", env_text or ""]
 
     def _foreign_accounts(self, answer: str) -> list:
@@ -700,6 +728,13 @@ class _AnswerGuard:
         `review`가 그것을 살린다(사용자 지시: 매뉴얼 기반 확인 사항을 먼저 안내하고,
         그 다음에 운영팀 문의)."""
         print(f"[agent] 근거 없는 답변을 차단했습니다: {reason}")
+        if self.routed_execution:
+            # 선검색을 건너뛴 질문이다. "매뉴얼에서 확인되지 않았습니다"는 **찾아봤는데
+            # 없었다**는 뜻이라 거짓말이 된다. 실제로 일어난 일은 **실행하지 않은 것**이다.
+            return ("이 질문은 실제로 확인해야 답할 수 있는데, 확인하지 못했습니다.\n"
+                    "정확하지 않은 정보를 드리지 않기 위해 답변을 드리지 않습니다. "
+                    "다시 한 번 물어봐 주시고, 계속 같으면 운영팀에 문의해 주세요."
+                    + self._intake_line())
         return ("문의하신 내용은 매뉴얼과 과거 사례에서 확인되지 않았습니다.\n"
                 "정확하지 않은 정보를 드리지 않기 위해 답변을 드리지 않습니다. "
                 "운영팀에 문의해 주세요." + self._intake_line())
@@ -747,6 +782,10 @@ class _AnswerGuard:
             return self.fallback("매뉴얼을 검색하지 않고 문서를 안내함")
         # 남의 계정은 **근거 유무와 무관하게** 막는다(질문 자체가 근거가 되어 버린다).
         foreign = self._foreign_accounts(answer)
+        if foreign:
+            # **무엇을 계정으로 봤는지 반드시 남긴다.** 오탐이면 이 줄이 유일한 단서다 —
+            # 정상 답변에서 안내 줄 하나가 조용히 빠진 일이 있었다(#178).
+            print(f"[agent] 남의 계정으로 판단해 제외: {', '.join(foreign[:8])}")
         bad = foreign + self._ungrounded(answer)
         if not bad:
             return answer
@@ -1075,13 +1114,14 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         검색이 도구 호출이 아니라 우리 코드라 진행 줄이 붙을 자리가 없었기 때문이다(#155).
         """
         rag_block, manual_hits, voc_hits = await _rag_context(last_text, history)
-        extra = ((memory_block or "") + rag_block) if rag_block else memory_block
+        extra = _now_asking(last_text) + (memory_block or "") + rag_block
         agent, _model, toolsets = await build_agent(caller_headers, extra)
         prepared["toolsets"] = toolsets
         prepared["found"] = (len(manual_hits), len(voc_hits))
         # 선검색을 건너뛴 질문에서는 "0건 찾음"이라고 말하면 안 된다 - 찾아봤는데 없었다는
         # 뜻이 되어 버린다. 아예 찾지 않은 것이다 (#177).
         prepared["routed"] = rag_block == _ROUTED_TO_EXECUTION
+        ground.routed_execution = prepared["routed"]
         ground.seed_rag(manual_hits, voc_hits)
         pace.mark_ready()      # 여기까지가 LLM을 부르기 전 준비 시간
         return Runner(agent=agent, app_name=APP_NAME,
@@ -1366,6 +1406,28 @@ def _voc_block(results: list) -> str:
     return "\n".join(lines)
 
 
+def _now_asking(question: str) -> str:
+    """**이번에 답할 질문**을 프롬프트에 못박는다 (#178).
+
+    실제로 이런 일이 났다: `내 홈스토리지 경로 알려줘`(실패) 다음에 `cpu, gpu 서버별 위치
+    알려줘`를 물었더니, 모델이 **앞 질문의 도구를 부르고 앞 질문에 답했다**. 매뉴얼은 이번
+    질문의 것을 제대로 찾아왔는데도 그랬다.
+
+    대화 이력은 세션 이벤트로 들어가므로 프롬프트에서 '지금 무엇을 묻는가'가 묻힌다.
+    지시문에 "이번 메시지만 보고 판단한다"고 적어 두는 것과, **이번 질문 원문을 그 자리에
+    적어 주는 것**은 다르다. 앞 답변이 실패로 끝났을 때 모델이 그것을 이어서 처리하려는
+    성향이 특히 강하다.
+    """
+    q = (question or "").strip()
+    if not q:
+        return ""
+    return ("\n\n# 이번에 답할 질문\n"
+            f"{q[:1000]}\n"
+            "**이 질문에만 답합니다.** 앞 대화는 대명사를 푸는 데만 씁니다 — 앞 질문이 "
+            "해결되지 않은 채 끝났더라도 이어서 처리하지 마세요. 이번 질문과 상관없는 도구를 "
+            "부르지 않고, 앞 답변의 문장을 다시 쓰지 않습니다.\n")
+
+
 _ROUTE_PROMPT = (
     "다음 문의에 답하려면 **그 사용자의 계정으로 서버에서 커맨드를 실행해 지금의 값을 직접 "
     "봐야만** 하는지 판단하라.\n"
@@ -1622,6 +1684,7 @@ async def agent_query(body: AgentQueryIn, request: Request):
     if mem_enabled:
         history, extra_instruction = await _memory_context(user_id, conv, body.message)
     rag_block, manual_hits, voc_hits = await _rag_context(body.message, history)
+    extra_instruction = (extra_instruction or "") + _now_asking(body.message)
     if rag_block:
         extra_instruction = (extra_instruction or "") + rag_block
 
@@ -1886,7 +1949,7 @@ async def voc_query(body: VocQueryIn, request: Request):
     fmt = _voc_format_instruction(body.output_option)
     extra_instruction = (extra_instruction + fmt) if extra_instruction else fmt
     rag_block, manual_hits, voc_hits = await _rag_context(body_text, history)
-    extra_instruction += rag_block
+    extra_instruction += _now_asking(body_text) + rag_block
 
     session_id = await _create_session(user_id, history)
     new_message = types.Content(role="user", parts=[types.Part(text=message)])

@@ -3554,6 +3554,80 @@ def test_manual_results_mask_accounts_on_every_path():
     assert "인프라팀" in out and "홍길동" in out and "other.user" not in out, out
 
 
+# --- #178: 앞 질문 오염 · 오탐 · 조용한 지시문 미반영 -----------------------------------
+def test_the_question_being_answered_is_pinned_in_the_prompt():
+    """`내 홈스토리지 경로 알려줘`(실패) 다음에 `cpu, gpu 서버별 위치 알려줘`를 물었더니,
+    모델이 **앞 질문의 도구를 부르고 앞 질문에 답했다**(#178). 매뉴얼은 이번 질문의 것을
+    제대로 찾아왔는데도 그랬다.
+
+    지시문에 "이번 메시지만 보고 판단한다"고 적는 것과, **이번 질문 원문을 그 자리에 적어
+    주는 것**은 다르다."""
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    ns = {}
+    exec(src[src.index("def _now_asking("):src.index("_ROUTE_PROMPT = ")], ns)  # noqa: S102
+    out = ns["_now_asking"]("cpu, gpu 서버별 위치 알려줘")
+    assert "# 이번에 답할 질문" in out and "cpu, gpu 서버별 위치 알려줘" in out
+    assert "이어서 처리하지 마세요" in out, "앞 질문을 이어받지 말라는 말이 없다"
+    assert ns["_now_asking"]("") == "", "질문이 비면 블록도 없어야 한다"
+
+    # 세 엔드포인트 모두 붙여야 한다 - 한 곳만 하면 그 경로에서 또 난다.
+    assert src.count("_now_asking(") >= 4, "일부 엔드포인트에만 붙어 있다"
+
+
+def test_accounts_are_not_detected_inside_urls():
+    """정상 답변에서 안내 줄 하나가 "남의 계정"으로 걸려 조용히 빠졌다 (#178).
+    주소 안의 `말.말`은 계정이 아니라 **호스트 이름**이다."""
+    pii = _pii()
+    # **두 마디짜리 호스트**여야 실제로 걸린다(세 마디는 점이 이어져 애초에 안 잡힌다).
+    url = "자세한 내용은 http://helpdesk.corp/guide/setup 를 보세요"
+    assert pii.mask_accounts(url) == url, pii.mask_accounts(url)
+    assert pii.find_accounts(url) == [], pii.find_accounts(url)
+
+    # 주소가 아닌 곳의 계정은 그대로 잡아야 한다(막느라 뚫으면 안 된다).
+    assert pii.find_accounts("/home/other.user/data 를 확인") == ["other.user"]
+    assert "other.user" not in pii.mask_accounts("담당은 other.user 입니다")
+
+
+def test_blocked_accounts_are_logged_so_false_positives_can_be_found():
+    """무엇을 계정으로 봤는지 안 남기면, 오탐일 때 단서가 하나도 없다 (#178)."""
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    assert "남의 계정으로 판단해 제외" in src, "제외한 토큰을 로그에 안 남긴다"
+
+
+def test_fallback_does_not_claim_a_search_that_never_ran():
+    """선검색을 건너뛴 질문(#177)에서 "매뉴얼과 과거 사례에서 확인되지 않았습니다"가 나갔다.
+    **찾아보지 않았다.** 사용자는 매뉴얼에 없는 줄 알게 된다 (#178)."""
+    g = _guard(True, "내 홈스토리지 경로 알려줘", user_id="ops.user")
+    g.routed_execution = True
+    out = g.fallback("테스트")
+    assert "매뉴얼과 과거 사례에서 확인되지 않았습니다" not in out, out
+    assert "확인하지 못했습니다" in out
+
+    g2 = _guard(True, "접속 방법 알려줘", user_id="ops.user")
+    assert "매뉴얼과 과거 사례에서 확인되지 않았습니다" in g2.fallback("테스트")
+
+
+def test_stale_instruction_is_reported_at_startup():
+    """지시문은 non-force 시드라 코드를 고쳐도 기존 DB에 반영되지 않는다. 그게 **조용해서**,
+    #158·#176·#177에서 넣은 규칙이 전달되지 않은 채로 "지시문에 적었는데 왜 안 지키지"를
+    반복했다 (#178). 조용한 실패를 눈에 보이게 만든다."""
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    assert "async def _warn_if_instruction_is_stale" in src
+    assert "await _warn_if_instruction_is_stale()" in src, "기동 시 부르지 않는다"
+    fn = src[src.index("async def _warn_if_instruction_is_stale"):src.index("async def require_api_key")]
+    # 문구 비교가 아니라 **파일 원문과 통째로** 비교해야 한다(#151의 매직 문자열 실패).
+    assert "current == AGENT_INSTRUCTION.strip()" in fn
+    assert "check-instruction.sh" in fn, "확인 방법을 알려주지 않는다"
+
+
+def test_instruction_does_not_invent_a_help_desk():
+    """답변 끝에 `미래기술 RnD helpdesk`가 나왔다 — 이 문의의 접수처가 아니다 (#178).
+    접수처는 '이 환경의 값'에 있는 것만 쓴다."""
+    instr = _instruction_text()
+    assert "접수처 이름은" in instr and "접수 경로에 있는 것만" in instr
+    assert "다른 창구 이름이 적혀" in instr
+
+
 # --- #177: 실행해야 답이 나오는 질문에는 **근거를 붙이지 않는다** ------------------------
 def _rag_src():
     src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
