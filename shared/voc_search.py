@@ -66,7 +66,9 @@ async def search_voc_records(query: str, top_k: int = 5, *, vec=None) -> list[di
     if not query or not query.strip():
         return []
     top_k = await clamp_top_k(top_k)
-    candidate_k = await clamp_candidates(top_k * 5)
+    # 매뉴얼과 같은 이유로 후보에 하한을 둔다(#179) — 프롬프트에 넣을 건수를 줄인 것이
+    # 검색 회수율까지 깎으면 안 된다.
+    candidate_k = await clamp_candidates(max(top_k * 5, 25))
     pool = await get_pool(_DSN)
 
     if vec is None:

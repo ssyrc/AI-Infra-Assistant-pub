@@ -219,7 +219,11 @@ async def search_manual_chunks(query: str, top_k: int = 5, *,
     if not query or not query.strip():
         return "빈 질의", []
     top_k = await clamp_top_k(top_k)
-    candidate_k = await clamp_candidates(top_k * 5)
+    # 후보 수를 top_k에만 매달면, **프롬프트에 몇 건을 넣을지**를 줄인 것이 곧 **검색 자체의
+    # 회수율**을 줄인다. 선검색(top_k=3)이 모델의 직접 검색(top_k=5)을 대신하게 되면서
+    # 후보가 25 → 15로 떨어졌고, 그때부터 "예전엔 나오던 문서가 안 나온다"가 됐다(#179).
+    # 후보를 더 보는 비용은 DB 시간뿐이다(리랭커에는 여전히 top_k*2만 남는다).
+    candidate_k = await clamp_candidates(max(top_k * 5, 25))
     pool = await get_pool(_DSN)
 
     mode, candidates = await _candidates(pool, query, candidate_k, vec)

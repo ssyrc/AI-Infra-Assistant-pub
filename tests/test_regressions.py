@@ -3554,6 +3554,57 @@ def test_manual_results_mask_accounts_on_every_path():
     assert "인프라팀" in out and "홍길동" in out and "other.user" not in out, out
 
 
+# --- #179: 선검색이 모델의 직접 검색을 **대신하면서 회수율이 떨어졌다** ------------------
+def test_candidate_pool_does_not_shrink_with_prompt_budget():
+    """`top_k`는 **프롬프트에 몇 건을 넣을까**이지 **검색을 얼마나 뒤질까**가 아니다.
+    후보를 `top_k*5`로만 잡아 두어, 선검색(top_k=3)이 모델의 직접 검색(top_k=5)을 대신하자
+    후보가 25 → 15로 줄었다. "예전엔 나오던 문서가 안 나온다"가 그것이다 (#179)."""
+    for mod in ("manual_search", "voc_search"):
+        src = open(os.path.join(ROOT, "shared", f"{mod}.py"), encoding="utf-8").read()
+        assert "clamp_candidates(max(top_k * 5, 25))" in src, \
+            f"{mod}: 후보 수에 하한이 없다 - top_k를 줄이면 검색 자체가 약해진다"
+
+
+def test_prefetch_top_k_matches_the_tool_it_replaces():
+    """선검색이 `search_manual`을 대신하는데 기본값이 더 작으면, 대신하는 것만으로 답이
+    나빠진다 (#179)."""
+    src = open(os.path.join(ROOT, "shared", "migrations.py"), encoding="utf-8").read()
+    assert '("manual_prefetch_top_k", "5"' in src, "search_manual 기본값(5)보다 작다"
+
+
+def test_voc_evidence_is_stated_to_be_as_good_as_the_manual():
+    """매뉴얼 블록만 "답변은 이 내용으로 만드세요"라고 강하게 말해서, 모델이 **VOC에 답이
+    있는데도** "매뉴얼에는 없는 내용입니다"로 끝냈다 (#179)."""
+    src = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
+    block = src[src.index("def _voc_block("):src.index("def _now_asking(")]
+    assert "여기 답이 있으면 그것으로 답합니다" in block
+    assert "매뉴얼과 과거 사례는 대등한" in block
+
+    instr = _instruction_text()
+    assert "매뉴얼과 대등한 근거입니다" in instr
+
+
+def test_free_command_tool_does_not_tell_the_model_to_prefer_registered_tools():
+    """`내 홈스토리지 경로`에 모델이 `pwd` 대신 등록된 할당량 조회 툴을 불렀다 (#179).
+    도구 설명이 "등록된 툴을 먼저 쓰라"고 시키고 있었다 — 이름만 비슷해도 그쪽으로 간다."""
+    src = open(os.path.join(ROOT, "mcp_servers", "execution_mcp", "server.py"),
+               encoding="utf-8").read()
+    desc = src[src.index('"run_command": {'):src.index('"enabled": True, "required_roles": []')]
+    assert "그 툴을 먼저 쓰고" not in desc, "등록 툴을 무조건 우선하라고 시킨다"
+    assert "묻는 것을 정확히 답할 때만" in desc
+    assert "일부러 툴로 등록해 두지 않았다" in desc, "표준 명령이 왜 없는지 알려주지 않는다"
+
+
+def test_destructive_commands_stay_blocked():
+    """자유 실행을 넓히면서 차단이 헐거워지지 않았는지 (#179). 사용자: "물론 rm 이나
+    심각한건 실행되지 않아야 함." """
+    sys.path.insert(0, os.path.join(ROOT, "shared"))
+    from execution_exec import DENY_BASE_COMMANDS
+    for cmd in ("rm", "dd", "mkfs", "shutdown", "reboot", "kill", "chmod", "chown",
+                "passwd", "sudo", "su", "bash", "sh", "eval", "ssh", "docker"):
+        assert cmd in DENY_BASE_COMMANDS, f"{cmd} 이 차단 목록에서 빠졌다"
+
+
 # --- #178: 앞 질문 오염 · 오탐 · 조용한 지시문 미반영 -----------------------------------
 def test_the_question_being_answered_is_pinned_in_the_prompt():
     """`내 홈스토리지 경로 알려줘`(실패) 다음에 `cpu, gpu 서버별 위치 알려줘`를 물었더니,
