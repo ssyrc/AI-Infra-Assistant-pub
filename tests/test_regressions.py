@@ -3475,3 +3475,18 @@ def test_answer_never_repeats_someone_elses_account():
     # 본인 계정은 그대로 나가야 한다.
     keep = g.review("ops.user 님의 홈은 정상입니다. 확인해 보세요.")
     assert "ops.user" in keep
+
+
+def test_public_tree_never_ships_an_empty_vendor_dir():
+    """공개 미러의 `admin_console/frontend/vendor/`에는 실제 js가 없다(.gitignore).
+    그 껍데기를 배포 경로에 덮어쓰면 서버의 react·babel이 지워져 콘솔이 **빈 화면**이
+    된다 — HTTP는 200을 주므로 네트워크 문제로 오진하기 쉽다 (#173).
+
+    아예 내보내지 않으면 덮어쓸 것도 없다."""
+    script = open(os.path.join(ROOT, "scripts", "make-public.sh"), encoding="utf-8").read()
+    assert 'rm -rf "$OUT/admin_console/frontend/vendor"' in script, \
+        "공개본에서 vendor 디렉토리를 빼지 않는다 - 서버의 react·babel이 지워진다"
+
+    out = os.path.join(ROOT, "dist", "public", "admin_console", "frontend", "vendor")
+    if os.path.isdir(os.path.join(ROOT, "dist", "public")):
+        assert not os.path.exists(out), "생성된 공개 트리에 vendor 껍데기가 남아 있다"
