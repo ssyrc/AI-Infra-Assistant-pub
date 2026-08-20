@@ -8,45 +8,51 @@
 
 ## 1. 전체 구조 — 요청 하나가 처리되는 과정
 
+**① 요청 → ② agent-server → ③ MCP → ④ 자원** 순서로 위에서 아래로 읽으면 된다.
+화살표를 따라 내려가면 한 요청이 지나가는 길이고, ④는 각 층이 쓰는 자원이다.
+
 ```mermaid
 %%{init: {'flowchart': {'curve': 'linear'}}}%%
 flowchart TB
-    OW["Open WebUI<br/>사용자 채팅"]
-    SH["Service Hub<br/>사내 VOC 시스템"]
+    OW["① Open WebUI<br/>사용자 채팅"]
+    SH["① Service Hub<br/>사내 VOC 시스템"]
 
-    subgraph AG["agent-server · FastAPI + Google ADK"]
+    subgraph AG["② agent-server · FastAPI + Google ADK"]
         direction TB
         API["OpenAI 호환 API<br/>/v1/chat/completions · /v1/voc/query"]
         PRE["질문 계획 · 선검색<br/>실행/검색 분기 · 질의 재작성"]
         RUN["ADK Runner + Agent<br/>도구 호출 루프 · 세션 · SSE 스트리밍"]
         LL["LiteLlm<br/>ADK genai 타입 ↔ OpenAI 타입 번역"]
-        POST["근거 검사 · 후처리<br/>미근거 값 제거 · 차트 인라인 · 답변 출력"]
+        POST["근거 검사 · 후처리<br/>미근거 값 제거 · 차트 인라인 · 답변 반환"]
         API --> PRE --> RUN --> POST
         RUN --> LL
     end
 
-    subgraph MCPS["MCP 4종 · FastMCP · streamable HTTP"]
+    subgraph MCPS["③ MCP 4종 · FastMCP · streamable HTTP"]
         direction LR
         M1["Manual<br/>매뉴얼 RAG"]
-        M2["VOC<br/>과거 문의 RAG"]
+        M2["VOC<br/>과거 사례 RAG"]
         M3["Execution<br/>커맨드 실행"]
         M4["Chart<br/>SVG 차트"]
     end
 
-    VLLM["vLLM · OpenAI 호환 서버<br/>Qwen3-235B-A22B<br/>bge-m3 · bge-reranker-v2-m3"]
-    HOST["게이트/로그인 서버<br/>ssh · 본인 계정으로 강등"]
-    PG[("PostgreSQL + pgvector<br/>설정 · 청크 · 임베딩 · 세션 · 이력")]
-    CON["관리자 콘솔<br/>설정 · 매뉴얼 · 커맨드 등록"]
+    subgraph RES["④ 자원 · 외부 시스템"]
+        direction LR
+        PG[("PostgreSQL + pgvector<br/>설정 · 청크 · 임베딩 · 세션 · 이력")]
+        CON["관리자 콘솔<br/>설정 · 매뉴얼 · 커맨드 등록"]
+        VLLM["vLLM · OpenAI 호환 서버<br/>LLM · 임베딩 · 리랭커"]
+        HOST["게이트/로그인 서버<br/>ssh · 본인 계정으로 강등"]
+    end
 
     OW -->|"OpenAI 호환 HTTP"| API
-    SH --> API
-    PRE --> VLLM
-    LL -->|"OpenAI 호환 HTTP"| VLLM
+    SH -->|"OpenAI 호환 HTTP"| API
     RUN -->|"tool call · streamable HTTP"| MCPS
+    LL -->|"OpenAI 호환 HTTP"| VLLM
+    MCPS -->|"임베딩 · 리랭킹"| VLLM
     MCPS --> PG
-    M3 --> HOST
-    CON --> PG
-    PG -.->|"설정값"| AG
+    M3 -->|"ssh"| HOST
+    MCPS ~~~ CON
+    CON -.->|"설정값을 써 넣는다"| PG
 ```
 
 **agent-server 안의 세 겹을 구분해서 보면 된다.**
