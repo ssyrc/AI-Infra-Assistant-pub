@@ -4002,3 +4002,34 @@ def test_registered_tool_says_it_only_returns_its_own_output():
     main = open(os.path.join(ROOT, "agent_server", "main.py"), encoding="utf-8").read()
     pat = re.compile(re.search(r'_CMD_IN_DESC = re\.compile\(r"(.+?)"\)', main).group(1))
     assert pat.findall(long)[-1] == "phd list {option}", pat.findall(long)
+
+
+def test_public_readme_is_the_real_one_not_a_stub():
+    """공개 미러의 첫 화면이자 발표에 쓰는 문서다. 따로 쓴 요약본을 두면 곧 원본과 어긋난다
+    (실제로 공개본은 넉 줄짜리 스텁이었다). 원본을 치환해서 그대로 내보낸다 (#182)."""
+    script = open(os.path.join(ROOT, "scripts", "make-public.sh"), encoding="utf-8").read()
+    paths = script[script.index("PATHS=("):script.index("for p in")]
+    assert "README.md" in paths.split("if [")[0], "README를 기본 반출 목록에 넣지 않았다"
+    # 스텁을 다시 쓰지 않는다(덮어쓰기 금지, 꼬리말만 덧댄다).
+    assert 'cat > "$OUT/README.md"' not in script, "원본을 스텁으로 덮어쓴다"
+    assert 'cat >> "$OUT/README.md"' in script, "공개본임을 밝히는 꼬리말이 없다"
+
+
+def test_readme_carries_the_architecture_for_presentation():
+    """발표용 문서다 — 구조·기법·보안이 그림과 함께 있어야 한다 (#182)."""
+    readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
+    diagrams = re.findall(r"```mermaid\n(.*?)```", readme, re.S)
+    assert len(diagrams) >= 4, f"도식이 {len(diagrams)}개뿐이다"
+    # subgraph를 열었으면 닫혀야 한다(안 닫히면 GitHub에서 그림 자리에 오류만 뜬다).
+    for d in diagrams:
+        assert len(re.findall(r"^\s*subgraph\b", d, re.M)) <= \
+            len(re.findall(r"^\s*end\s*$", d, re.M)), d[:80]
+    for must in ("Service Hub", "관리자 콘솔", "vLLM", "agent-server",
+                 "RRF", "멀티 쿼리", "리랭킹", "권한 강등", "차단 목록", "셸 미경유"):
+        assert must in readme, f"발표에 필요한 내용이 빠졌다: {must}"
+
+    # 사용자 지시: 줄글 대신 명사형·`~함`으로 끝낸다. **문장 끝을 본다**(줄 끝이 아니라) —
+    # 한 줄에 두 문장이 있으면 줄 끝 검사는 앞 문장을 놓친다.
+    prose = re.sub(r"```.*?```", "", readme, flags=re.S)
+    bad = re.findall(r"[^\n]{0,30}(?:습니다|합니다|입니다|한다|된다|없다)\.", prose)
+    assert not bad, f"줄글 종결이 남아 있다: {bad[:3]}"
