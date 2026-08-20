@@ -6,33 +6,51 @@
 
 ---
 
-## 1. 전체 구조 — 요청 하나가 처리되는 과정
+## 1. 전체 구조 — 사용자 요청 → Agent → MCP → 답변 생성 → 반환
+
+굵은 선이 본류, 점선이 각 단계가 쓰는 자원.
 
 ```mermaid
-flowchart TB
-    U["사용자<br/>Open WebUI"] -->|"/v1/chat/completions<br/>OpenAI 호환"| S1
-    SH["Service Hub<br/>사내 VOC 시스템"] -->|"/v1/voc/query"| S1
+flowchart LR
+    U["사용자 요청<br/>Open WebUI · Service Hub<br/>OpenAI 호환 API"] ==> AG
 
-    subgraph AG["agent-server · FastAPI + Google ADK"]
+    subgraph AG["Agent · agent-server · FastAPI + Google ADK"]
         direction TB
-        S1["① 질문 계획 · LLM 1회<br/>JSON: 실행/검색 · 근거 선택 · 질의 재작성"]
-        S2["② 선검색 강제 · 멀티 쿼리<br/>모델에게 맡기지 않음"]
-        S3["③ 에이전트 루프<br/>ADK Runner + LiteLlm · SSE 스트리밍<br/>현재 질문 고정 · 실행 규칙 주입"]
-        S4["④ 근거 검사<br/>미근거 IP·경로 · 타 계정 줄 제거"]
-        S5["⑤ 후처리<br/>차트 data URI 치환 · 실행 원문 병기"]
-        S1 -->|"search"| S2 --> S3
-        S1 -->|"execute · 근거 미첨부"| S3
-        S3 --> S4 --> S5
+        P["① 질문 계획 · LLM 1회<br/>실행/검색 · 근거 선택 · 질의 재작성"]
+        R["② 선검색 강제<br/>Manual·VOC 를 코드가 먼저 호출"]
+        L["③ 에이전트 루프 · ADK Runner + LiteLlm<br/>도구 선택 · 현재 질문 고정 · 실행 규칙 주입"]
+        P -->|"search"| R --> L
+        P -->|"execute · 근거 미첨부"| L
     end
 
-    S1 & S3 -->|"OpenAI 호환 추론"| LLM["vLLM<br/>Qwen3-235B-A22B<br/>hermes tool parser"]
-    S2 -->|"임베딩 · 리랭킹"| EMB["bge-m3 1024차원<br/>bge-reranker-v2-m3"]
-    S3 <-->|"tool call · streamable HTTP"| MCPS["MCP 4종 · FastMCP<br/>Manual · VOC · Execution · Chart"]
-    MCPS --> PG[("PostgreSQL + pgvector<br/>asyncpg 풀")]
-    MCPS -->|"ssh · 본인 계정 강등"| HOST["게이트/로그인 서버"]
-    S5 --> OUT["진행 줄 + 답변 + 실행 원문"]
+    subgraph MS["MCP 4종 · FastMCP · streamable HTTP"]
+        direction TB
+        MM["Manual · 매뉴얼 RAG"]
+        MV["VOC · 과거 사례 RAG"]
+        ME["Execution · 커맨드 실행"]
+        MC["Chart · SVG 생성"]
+    end
 
-    CON["관리자 콘솔<br/>FastAPI + React"] --> PG
+    subgraph GEN["답변 생성 · agent-server 안"]
+        direction TB
+        D["④ LLM 스트리밍 초안"]
+        C["⑤ 근거 검사<br/>미근거 값 · 타 계정 줄 제거"]
+        F["⑥ 차트 인라인 · 실행 원문 병기"]
+        D --> C --> F
+    end
+
+    AG ==>|"tool call<br/>X-User-Id · X-MCP-Secret"| MS
+    MS ==>|"tool result<br/>근거 · 실행 결과 · 차트"| GEN
+    MS -.->|"근거 부족 시 재호출"| AG
+    GEN ==>|"반환<br/>진행 줄 + 답변 + 실행 원문"| OUT["사용자"]
+
+    MM & MV -.->|"임베딩 · 리랭킹"| EMB["bge-m3 1024차원<br/>bge-reranker-v2-m3"]
+    ME -.->|"ssh · 본인 계정 강등"| HOST["게이트/로그인 서버"]
+    MM & MV & ME -.-> PG[("PostgreSQL + pgvector")]
+    AG -.->|"계획·추론"| LLM["vLLM<br/>Qwen3-235B-A22B<br/>hermes tool parser"]
+    GEN -.->|"답변 생성"| LLM
+
+    CON["관리자 콘솔<br/>FastAPI + React"] -.->|"매뉴얼·VOC 적재 · 커맨드 등록 · 설정<br/>→ 재시작 시 MCP 도구 목록·임계값 재구성"| PG
 ```
 
 | 계층 | 기술 | 이 구조에서 맡는 것 |
@@ -49,37 +67,30 @@ flowchart TB
 ## 2. MCP별 실행 구조
 
 ```mermaid
-flowchart TB
+flowchart LR
     subgraph MAN["Manual MCP · 매뉴얼 RAG"]
-        direction TB
-        MQ["질의 · 멀티 쿼리"] --> M3X["3축 병렬<br/>벡터 cosine · tsvector 접두 질의 · pg_trgm"]
-        M3X --> MRRF["RRF 융합 1/(60+rank)"] --> MMERGE["질의별 후보 병합"]
-        MMERGE --> MRR["cross-encoder 리랭킹<br/>원 질문 기준 1회 · 관련도 하한"]
-        MRR --> MMMR["MMR 중복 제거"] --> MNB["이웃 청크 확장<br/>예산 우선 배치"]
-        MNB --> MPII["계정·이메일 마스킹"]
+        direction LR
+        MQ["질의<br/>멀티 쿼리"] --> M3X["3축 병렬<br/>벡터 cosine · tsvector 접두 질의 · pg_trgm"]
+        M3X --> MR["RRF 융합<br/>질의별 후보 병합"] --> MRR["리랭킹 1회<br/>관련도 하한 · MMR"]
+        MRR --> MNB["이웃 청크 확장<br/>예산 우선 배치"] --> MPII["계정·이메일<br/>마스킹"]
     end
 
-    subgraph VOC["VOC MCP · 과거 사례 RAG"]
-        direction TB
-        VQ["질의 · 멀티 쿼리"] --> V3X["3축 병렬 + RRF"]
-        V3X --> VRR["리랭킹 · MMR"]
-        VRR --> VH["처리 주체 판정<br/>user / operator / unknown"]
-        VH --> VPII["계정·이름·조직 전체 마스킹"]
+    subgraph VOCG["VOC MCP · 과거 사례 RAG"]
+        direction LR
+        VQ["질의<br/>멀티 쿼리"] --> V3X["3축 병렬 + RRF"] --> VRR["리랭킹 · MMR"]
+        VRR --> VH["처리 주체 판정<br/>user / operator / unknown"] --> VPII["계정·이름·조직<br/>전체 마스킹"]
     end
 
     subgraph EXE["Execution MCP · 커맨드 실행"]
-        direction TB
-        ET["도구 노출<br/>등록 커맨드 = 전용 도구<br/>그 밖 = run_command"] --> EV["인자 검증<br/>타입·선택지·개수·길이"]
-        EV --> ED["차단 목록 · 타 계정 지목 차단"]
-        ED --> EA["argv 리스트 구성 · 셸 미경유"]
-        EA --> ESSH["ssh → 즉시 권한 강등"]
-        ESSH --> ER["exit_code · stdout · duration_ms<br/>실행 이력 기록"]
+        direction LR
+        ET["도구 노출<br/>등록 커맨드 = 전용 도구<br/>그 밖 = run_command"] --> EV["인자 검증<br/>타입·선택지·개수"]
+        EV --> ED["차단 목록<br/>타 계정 지목 차단"] --> EA["argv 구성<br/>셸 미경유"]
+        EA --> ESSH["ssh → 즉시<br/>권한 강등"] --> ER["exit_code · stdout<br/>실행 이력 기록"]
     end
 
     subgraph CHT["Chart MCP · 시각화"]
-        direction TB
-        CD["실행·조회로 얻은 수치만"] --> CS["SVG 생성<br/>8종 · 값 라벨 · 범례"]
-        CS --> CM["표시자 chart://id 반환<br/>응답 직전 data URI 치환"]
+        direction LR
+        CD["실행·조회로<br/>얻은 수치만"] --> CS["SVG 생성<br/>8종 · 값 라벨 · 범례"] --> CM["표시자 반환<br/>응답 직전 data URI"]
     end
 
     MPII & VPII --> P["프롬프트 근거 블록"]
