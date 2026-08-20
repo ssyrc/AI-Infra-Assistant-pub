@@ -4019,7 +4019,9 @@ def test_readme_carries_the_architecture_for_presentation():
     """발표용 문서다 — 구조·기법·보안이 그림과 함께 있어야 한다 (#182)."""
     readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
     diagrams = re.findall(r"```mermaid\n(.*?)```", readme, re.S)
-    assert len(diagrams) >= 4, f"도식이 {len(diagrams)}개뿐이다"
+    # 셋(전체 구조 · MCP별 실행 구조 · 보안). 사용자 지시로 줄글과 부수 절을 걷어내고
+    # **도식으로 보여 주는** 형태로 바꿨다 - 개수를 늘리는 것이 목적이 아니다.
+    assert len(diagrams) >= 3, f"도식이 {len(diagrams)}개뿐이다"
     # subgraph를 열었으면 닫혀야 한다(안 닫히면 GitHub에서 그림 자리에 오류만 뜬다).
     for d in diagrams:
         assert len(re.findall(r"^\s*subgraph\b", d, re.M)) <= \
