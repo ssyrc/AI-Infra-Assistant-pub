@@ -8,8 +8,8 @@
 
 ## 1. 전체 구조 — 요청 하나가 처리되는 과정
 
-**① 요청 → ② agent-server → ③ MCP → ④ 자원** 순서로 위에서 아래로 읽으면 된다.
-화살표를 따라 내려가면 한 요청이 지나가는 길이고, ④는 각 층이 쓰는 자원이다.
+**① 요청 → ② agent-server → ③ MCP → ④ 자원** 순으로 위에서 아래로 배치.
+화살표가 요청 하나의 처리 경로, ④는 각 층이 쓰는 자원.
 
 ```mermaid
 %%{init: {'flowchart': {'curve': 'linear', 'nodeSpacing': 25, 'rankSpacing': 32, 'padding': 6}, 'themeVariables': {'fontSize': '12px'}}}%%
@@ -55,17 +55,16 @@ flowchart TB
     CON -.->|"설정값"| PG
 ```
 
-**agent-server 안의 세 겹을 구분해서 보면 된다.**
+**agent-server 구성 — 세 겹**
 
-- **Google ADK** — 에이전트를 *정의하고 굴리는* 층. `Agent`가 모델·지시문·툴(MCP 4종)을 묶고,
-  `Runner`가 도구 호출 루프를 돌리며, `DatabaseSessionService`가 대화 세션을 들고,
-  `RunConfig(SSE)`가 토큰 스트리밍을 켠다. **MCP는 ADK가 `McpToolset`으로 직접 붙는다**
-  (LiteLLM을 거치지 않는다).
-- **LiteLlm** — ADK와 LLM 사이의 *요청/응답 담당*. ADK 내부는 google.genai 타입,
-  vLLM은 OpenAI 타입이라 이 사이를 양방향 번역한다(MCP 툴 스키마 → OpenAI `tools[]`,
-  돌아온 `tool_calls` → ADK 이벤트). **LLM 호출은 언제나 Agent가 하고, MCP는 하지 않는다.**
-- **우리 코드** — 질문 계획·선검색·근거 검사·후처리. 여기서 부르는 LLM/임베딩은 ADK를 타지 않고
-  `httpx`로 vLLM을 직접 친다.
+- **Google ADK** — 에이전트 정의·실행 층. `Agent`가 모델·지시문·툴(MCP 4종) 묶음 구성,
+  `Runner`가 도구 호출 루프 수행, `DatabaseSessionService`가 대화 세션 보관,
+  `RunConfig(SSE)`로 토큰 스트리밍. **MCP 연결은 ADK의 `McpToolset`이 담당**(LiteLLM 미경유).
+- **LiteLlm** — ADK와 LLM 사이의 요청/응답 담당. ADK 내부는 google.genai 타입, vLLM은
+  OpenAI 타입이므로 양방향 번역 수행(MCP 툴 스키마 → OpenAI `tools[]`, 응답의 `tool_calls`
+  → ADK 이벤트). **LLM 호출 주체는 언제나 Agent, MCP는 미호출.**
+- **자체 구현** — 질문 계획·선검색·근거 검사·후처리. 이 경로의 LLM/임베딩은 ADK 미경유,
+  `httpx`로 vLLM 직접 호출.
 
 | 계층 | 기술 | 이 구조에서 맡는 것 |
 |---|---|---|
@@ -76,8 +75,8 @@ flowchart TB
 | 저장 | **PostgreSQL + pgvector** · asyncpg | 청크·임베딩·설정·세션·이력 |
 | 화면 | **Open WebUI** / React + Babel standalone | 사용자 채팅 / 관리자 콘솔 |
 
-**관리자 콘솔은 요청 경로에 없다.** 모델 주소·모델명·시스템 지시문·등록 커맨드·API 키를 DB에
-써 넣고, agent-server와 MCP가 매 요청 그 값을 읽는다(위 그림의 점선).
+**관리자 콘솔은 요청 경로 밖.** 모델 주소·모델명·시스템 지시문·등록 커맨드·API 키를 DB에 기록,
+agent-server와 MCP가 매 요청 해당 값 조회(그림의 점선).
 
 ---
 
