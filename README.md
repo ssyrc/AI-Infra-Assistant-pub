@@ -9,40 +9,91 @@
 ## 1. 전체 구조 — 요청 하나가 처리되는 과정
 
 ```mermaid
+%%{init: {'flowchart': {'curve': 'linear'}}}%%
 flowchart TB
-    U["사용자<br/>Open WebUI"] -->|"/v1/chat/completions<br/>OpenAI 호환"| S1
-    SH["Service Hub<br/>사내 VOC 시스템"] -->|"/v1/voc/query"| S1
+    OW["Open WebUI<br/>사용자 채팅"]
+    SH["Service Hub<br/>사내 VOC 시스템"]
 
     subgraph AG["agent-server · FastAPI + Google ADK"]
         direction TB
-        S1["① 질문 계획 · LLM 1회<br/>JSON: 실행/검색 · 근거 선택 · 질의 재작성"]
-        S2["② 선검색 강제 · 멀티 쿼리<br/>모델에게 맡기지 않음"]
-        S3["③ 에이전트 루프<br/>ADK Runner + LiteLlm · SSE 스트리밍<br/>현재 질문 고정 · 실행 규칙 주입"]
-        S4["④ 근거 검사<br/>미근거 IP·경로 · 타 계정 줄 제거"]
-        S5["⑤ 후처리<br/>차트 data URI 치환 · 실행 원문 병기"]
-        S1 -->|"search"| S2 --> S3
-        S1 -->|"execute · 근거 미첨부"| S3
-        S3 --> S4 --> S5
+        API["OpenAI 호환 API<br/>/v1/chat/completions · /v1/voc/query"]
+        PRE["질문 계획 · 선검색<br/>실행/검색 분기 · 질의 재작성"]
+        RUN["ADK Runner + Agent<br/>도구 호출 루프 · 세션 · SSE 스트리밍"]
+        LL["LiteLlm<br/>ADK genai 타입 ↔ OpenAI 타입 번역"]
+        POST["근거 검사 · 후처리<br/>미근거 값 제거 · 차트 인라인 · 답변 출력"]
+        API --> PRE --> RUN --> POST
+        RUN --> LL
     end
 
-    S1 & S3 -->|"OpenAI 호환 추론"| LLM["vLLM<br/>Qwen3-235B-A22B<br/>hermes tool parser"]
-    S2 -->|"임베딩 · 리랭킹"| EMB["bge-m3 1024차원<br/>bge-reranker-v2-m3"]
-    S3 <-->|"tool call · streamable HTTP"| MCPS["MCP 4종 · FastMCP<br/>Manual · VOC · Execution · Chart"]
-    MCPS --> PG[("PostgreSQL + pgvector<br/>asyncpg 풀")]
-    MCPS -->|"ssh · 본인 계정 강등"| HOST["게이트/로그인 서버"]
-    S5 --> OUT["진행 줄 + 답변 + 실행 원문"]
+    subgraph MCPS["MCP 4종 · FastMCP · streamable HTTP"]
+        direction LR
+        M1["Manual<br/>매뉴얼 RAG"]
+        M2["VOC<br/>과거 문의 RAG"]
+        M3["Execution<br/>커맨드 실행"]
+        M4["Chart<br/>SVG 차트"]
+    end
 
-    CON["관리자 콘솔<br/>FastAPI + React"] --> PG
+    VLLM["vLLM · OpenAI 호환 서버<br/>Qwen3-235B-A22B<br/>bge-m3 · bge-reranker-v2-m3"]
+    HOST["게이트/로그인 서버<br/>ssh · 본인 계정으로 강등"]
+    PG[("PostgreSQL + pgvector<br/>설정 · 청크 · 임베딩 · 세션 · 이력")]
+    CON["관리자 콘솔<br/>설정 · 매뉴얼 · 커맨드 등록"]
+
+    OW -->|"OpenAI 호환 HTTP"| API
+    SH --> API
+    PRE --> VLLM
+    LL -->|"OpenAI 호환 HTTP"| VLLM
+    RUN -->|"tool call · streamable HTTP"| MCPS
+    MCPS --> PG
+    M3 --> HOST
+    CON --> PG
+    PG -.->|"설정값"| AG
 ```
+
+**agent-server 안의 세 겹을 구분해서 보면 된다.**
+
+- **Google ADK** — 에이전트를 *정의하고 굴리는* 층. `Agent`가 모델·지시문·툴(MCP 4종)을 묶고,
+  `Runner`가 도구 호출 루프를 돌리며, `DatabaseSessionService`가 대화 세션을 들고,
+  `RunConfig(SSE)`가 토큰 스트리밍을 켠다. **MCP는 ADK가 `McpToolset`으로 직접 붙는다**
+  (LiteLLM을 거치지 않는다).
+- **LiteLlm** — ADK와 LLM 사이의 *요청/응답 담당*. 아래 참조.
+- **우리 코드** — 질문 계획·선검색·근거 검사·후처리. 여기서 부르는 LLM/임베딩은 ADK를 타지 않고
+  `httpx`로 vLLM을 직접 친다.
+
+### vLLM에 그냥 붙이면 안 되나 — 안 된다
+
+**ADK에는 OpenAI 호환 클라이언트가 없다.** `google/adk/models/`가 자체로 가진 모델 클래스는
+`Gemini`(google-genai) · `Gemma` · `ApigeeLlm` · `Claude`(anthropic SDK)뿐이고,
+그 외 모든 백엔드는 `LiteLlm`을 통해 붙게 되어 있다. vLLM은 OpenAI 호환 API로 서빙되므로
+ADK가 말을 걸 수 있는 경로가 `LiteLlm` 하나다(대안은 `BaseLlm`을 직접 구현하는 것뿐).
+
+게다가 단순 HTTP 중계가 아니다. **ADK 내부는 google.genai 타입**(`types.Content`,
+`types.FunctionDeclaration`), **vLLM은 OpenAI 타입**(`messages[]`, `tools[]`, `tool_calls[]`)이라
+양방향 번역이 필요하다 — MCP 툴 스키마를 OpenAI `tools[]`로 바꾸고, 돌아온 `tool_calls`를 다시
+ADK 이벤트로 되돌리는 일. 툴을 쓰는 에이전트에서는 이 번역이 핵심 경로다.
+
+```
+Open WebUI / Service Hub ──OpenAI 호환 HTTP──▶ agent-server (FastAPI)   ← 우리가 서빙하는 쪽
+                                                    │
+                                            ADK Runner + Agent ──streamable HTTP──▶ MCP 4종
+                                                    │  (google.genai 타입)
+                                                 LiteLlm                 ← 번역기
+                                                    │  ──OpenAI 호환 HTTP──▶ vLLM
+```
+
+양 끝에 "OpenAI 호환"이 두 번 나오지만 서로 다른 것이다. 입구는 Open WebUI가 그 스펙만 말할 줄
+알아서 우리가 흉내 낸 것이고, 출구가 LiteLlm이 맡는 부분이다.
 
 | 계층 | 기술 | 이 구조에서 맡는 것 |
 |---|---|---|
-| 에이전트 런타임 | **Google ADK** `Runner`·`Agent` | 도구 호출 루프, 세션 이벤트, SSE 스트리밍 |
-| 모델 접속 | **LiteLlm** (`openai/…`) | 사내 vLLM을 OpenAI 호환으로 연결 |
+| 에이전트 런타임 | **Google ADK** `Runner`·`Agent`·`McpToolset` | 도구 호출 루프, MCP 연결, 세션, SSE 스트리밍 |
+| 모델 접속 | **LiteLlm** (`openai/…`) | ADK↔OpenAI 타입 번역, 사내 vLLM 호출 |
 | API | **FastAPI** | OpenAI 호환 엔드포인트, Service Hub 위임 API |
 | 도구 | **FastMCP** · streamable HTTP | MCP 4종. 호출자 헤더 전달 |
 | 저장 | **PostgreSQL + pgvector** · asyncpg | 청크·임베딩·설정·세션·이력 |
 | 화면 | **Open WebUI** / React + Babel standalone | 사용자 채팅 / 관리자 콘솔 |
+
+**관리자 콘솔은 요청 경로에 없다.** 모델 주소·모델명·시스템 지시문·등록 커맨드·API 키를 DB에
+써 넣고, agent-server와 MCP가 매 요청 그 값을 읽는다(위 그림의 점선).
 
 ---
 
